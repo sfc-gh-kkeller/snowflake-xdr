@@ -113,24 +113,40 @@ function safeJson(s: string): unknown {
   try { return JSON.parse(s) } catch { return null }
 }
 
+/**
+ * DATA_AGENT_RUN accepts exactly one user message (no assistant turns), so prior
+ * turns are folded into that message as conversation context.
+ */
+function foldHistory(turns: { role: string; text: string }[]): string {
+  const question = turns[turns.length - 1].text
+  const history = turns.slice(0, -1).slice(-10)
+  if (history.length === 0) return question
+  const ctx = history.map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.text}`).join("\n\n")
+  return `Conversation so far:\n${ctx}\n\nFollow-up question (answer this, using the context above): ${question}`
+}
+
 export const ask = {
   "ask.agent": async (p: Record<string, unknown>) => {
     const raw = p.messages
     if (!Array.isArray(raw) || raw.length === 0 || raw.length > 30) {
       throw new InputError("messages must be a list of 1-30 chat turns")
     }
-    const messages = raw.map((m, i) => {
+    const turns = raw.map((m, i) => {
       const msg = m as Record<string, unknown>
       const role = msg?.role === "assistant" ? "assistant" : msg?.role === "user" ? "user" : null
       if (!role) throw new InputError(`messages[${i}].role must be user or assistant`)
-      const text = str(msg, "text", { max: 4000, required: true })
-      return { role, content: [{ type: "text", text }] }
+      return { role, text: str(msg, "text", { max: 4000, required: true }) }
     })
-    if (messages[messages.length - 1].role !== "user") throw new InputError("last message must be from the user")
+    if (turns[turns.length - 1].role !== "user") throw new InputError("last message must be from the user")
     const resp = await scalar(
       `SELECT SNOWFLAKE.CORTEX.DATA_AGENT_RUN('${AGENT}', ?, TRUE) AS resp`,
-      [JSON.stringify({ messages })], { long: true })
-    const { text, tools } = extractAgentText(resp)
+      [JSON.stringify({ messages: [{ role: "user", content: [{ type: "text", text: foldHistory(turns) }] }] })],
+      { long: true })
+    const parsed = (typeof resp === "string" ? safeJson(resp) : resp) as Record<string, unknown> | null
+    if (parsed?.error_code || (parsed?.code && parsed?.message && !parsed?.content)) {
+      throw new Error(`Agent error ${parsed.error_code ?? parsed.code}: ${parsed.message}`)
+    }
+    const { text, tools } = extractAgentText(parsed)
     return { text: text || "(The agent returned no text response.)", tools }
   },
 }
