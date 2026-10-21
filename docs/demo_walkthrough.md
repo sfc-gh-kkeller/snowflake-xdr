@@ -1,12 +1,11 @@
 # XDR Demo Walkthrough
 
-A step-by-step demo script for the XDR platform on
-SFSENORTHAMERICA-SECFIELDKELLER (AWS eu-central-1).
+A step-by-step demo script for the XDR platform.
 
 - **XDR Console** (current): `cd xdr-console && snow app open -c aws_demo_kevin`
   (the URL is also printed at the end of `scripts/deploy_demo.sh`; it changes
   when the service is recreated by a `--fresh` build)
-- XDR_SOC Streamlit (deprecated, kept for reference): https://app.snowflake.com/SFSENORTHAMERICA/secfieldkeller/#/streamlit-apps/SNOWFLAKE_XDR.DASHBOARDS.XDR_SOC
+- XDR_SOC Streamlit (deprecated, kept for reference): Snowsight → Projects → Streamlit → `SNOWFLAKE_XDR.DASHBOARDS.XDR_SOC`
 
 ## Before the demo
 

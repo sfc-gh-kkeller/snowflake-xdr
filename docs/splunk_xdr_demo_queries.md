@@ -8,7 +8,7 @@ This guide shows how to query the Snowflake XDR platform from Splunk using DB Co
 1. Install the **Splunk DB Connect** app on your Splunk instance.
 2. Add an identity (Snowflake user) and a connection:
    - **Type**: Snowflake
-   - **Account**: your Snowflake account identifier (e.g. `SFSENORTHAMERICA-SECFIELDKELLER`)
+   - **Account**: your Snowflake account identifier (e.g. `MYORG-MYACCOUNT`)
    - **Warehouse**: `XDR_WH`
    - **Database**: `SNOWFLAKE_XDR`
 3. Set the connection's default schema to `SPLUNK_VIEWS`.

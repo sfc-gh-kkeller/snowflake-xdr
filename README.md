@@ -4,6 +4,18 @@ A Snowflake-native XDR/SIEM: telemetry, detections, incident correlation,
 attack-graph analysis, Cortex AI agents, response automation and the analyst
 UI all run inside one Snowflake account — no external infrastructure.
 
+## Screenshots
+
+| SOC Overview | Triage & Cases |
+|---|---|
+| ![SOC Overview](docs/screenshots/overview.png) | ![Triage & Cases](docs/screenshots/triage.png) |
+| **Investigations** | **Attack Graph** |
+| ![Investigations](docs/screenshots/investigations.png) | ![Attack Graph](docs/screenshots/attack-graph.png) |
+| **Threat Hunting** | **Detections** |
+| ![Threat Hunting](docs/screenshots/hunt.png) | ![Detections](docs/screenshots/detections.png) |
+| **Security Posture** | |
+| ![Security Posture](docs/screenshots/posture.png) | |
+
 ## What's in it
 
 - **Detection engine** — 30 MITRE ATT&CK-mapped rules (stored procedures), custom
