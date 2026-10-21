@@ -1,0 +1,36 @@
+definition_version: 2
+entities:
+  xdr_soc:
+    type: streamlit
+    identifier:
+      name: XDR_SOC
+      database: SNOWFLAKE_XDR
+      schema: DASHBOARDS
+    query_warehouse: XDR_WH
+    runtime_name: SYSTEM$ST_CONTAINER_RUNTIME_PY3_11
+    compute_pool: SYSTEM_COMPUTE_POOL_CPU
+    main_file: app.py
+    artifacts:
+      - app.py
+      - pyproject.toml
+      - utils/__init__.py
+      - utils/deprecation.py
+      - pages/1_soc_overview.py
+      - pages/2_threat_map.py
+      - pages/3_triage_queue.py
+      - pages/4_alert_center.py
+      - pages/5_case_management.py
+      - pages/6_entity_investigation.py
+      - pages/7_incident_view.py
+      - pages/8_hunting_console.py
+      - pages/9_agent_comparison.py
+      - pages/10_detection_library.py
+      - pages/11_mitre_coverage.py
+      - pages/12_rule_editor.py
+      - pages/13_response_automation.py
+      - pages/14_ioc_management.py
+      - pages/15_security_posture.py
+      - pages/16_health_monitoring.py
+      - pages/17_attack_graph.py
+      - pages/18_live_tail.py
+      - pages/19_ask_xdr.py

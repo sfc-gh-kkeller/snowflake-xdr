@@ -1,0 +1,33 @@
+# Secrets / local config — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.p8
+*.key
+connections.toml
+config.toml
+**/secrets.*
+
+# Local tool state
+.snowflake/
+.DS_Store
+.vscode/
+.idea/
+
+# Generated output & logs
+output/
+*.log
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+coverage/
+
+# Python
+__pycache__/
+*.pyc
+.venv/

@@ -1,0 +1,10 @@
+[project]
+name = "xdr-soc"
+version = "1.0.0"
+description = "Snowflake XDR SOC dashboard"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.40.0",
+    "snowflake-connector-python[pandas]",
+    "pandas>=2.0.0",
+]

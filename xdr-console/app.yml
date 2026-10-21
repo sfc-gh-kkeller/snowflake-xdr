@@ -1,0 +1,36 @@
+version: 2
+
+name: XDR_CONSOLE
+database: SNOWFLAKE_XDR
+schema: DASHBOARDS
+query_warehouse: XDR_WH
+
+label: "XDR Console"
+description: "Snowflake-native XDR: triage, investigations, attack-graph correlation, detection engineering, response automation, and the XDR Analyst agent."
+icon: public/icon.svg
+
+ignore:
+  - node_modules
+  - .env*
+  - __pycache__
+  - "*.pyc"
+  - .next
+  - .git
+  - snowflake.log
+  - output
+
+install:
+  commands:
+    - ["npm", "ci", "--include=dev"]
+
+build:
+  commands:
+    - ["npm", "run", "build"]
+    # Standalone mode: the server bundle needs static assets copied alongside
+    - ["cp", "-r", ".next/static", ".next/standalone/.next/static"]
+    - ["cp", "-r", "public", ".next/standalone/public"]
+    # The standalone bundle carries its own node_modules
+    - ["rm", "-rf", "node_modules"]
+
+run:
+  command: ["node", ".next/standalone/server.js"]
