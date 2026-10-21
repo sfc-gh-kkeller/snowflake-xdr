@@ -119,6 +119,98 @@ The schema uses Splunk CIM field names natively. To query from Splunk:
 | dbxquery query="SELECT * FROM SNOWFLAKE_XDR.SPLUNK_VIEWS.V_AUTHENTICATION WHERE action='failure' AND _time > DATEADD('hour', -1, CURRENT_TIMESTAMP())" connection="snowflake_xdr"
 ```
 
+## Example: Ingesting Okta System Logs
+
+The demo ships with synthetic data, but `RAW_LOGS.AUTHENTICATION` is CIM-shaped and already
+expects `app = 'okta'` / `authentication_service = 'Okta'`. Land real Okta events there and the
+existing detections, Attack Graph, Entity 360 and Splunk views pick them up unchanged.
+
+**Recommended path (push-based, no polling code):**
+
+```
+Okta System Log ──Log Streaming──▶ Amazon EventBridge ──▶ Firehose ──▶ S3 ──Snowpipe──▶ OKTA_SYSTEM_LOG_RAW
+                                                                                         │ stream + task
+                                                                                         ▼
+                                                                           RAW_LOGS.AUTHENTICATION ──▶ detections
+```
+
+1. In Okta Admin: **Reports → Log Streaming → Add → AWS EventBridge** (creates a partner event source).
+2. In AWS: associate the event source with an event bus, add a rule targeting a Firehose
+   stream that writes JSON to S3.
+3. In Snowflake: create a storage integration + external stage on that bucket, then:
+
+```sql
+USE SCHEMA SNOWFLAKE_XDR.RAW_LOGS;
+
+-- 1. Landing table + auto-ingest pipe (configure S3 event notifications to the pipe's SQS ARN)
+CREATE TABLE IF NOT EXISTS OKTA_SYSTEM_LOG_RAW (
+    v VARIANT, file_name STRING, loaded_at TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP());
+
+CREATE PIPE IF NOT EXISTS OKTA_PIPE AUTO_INGEST = TRUE AS
+  COPY INTO OKTA_SYSTEM_LOG_RAW (v, file_name)
+  FROM (SELECT $1:detail, METADATA$FILENAME FROM @OKTA_STAGE)  -- EventBridge wraps the Okta event in "detail"
+  FILE_FORMAT = (TYPE = JSON);
+
+-- 2. Incrementally normalize into the CIM table the detections already read
+CREATE STREAM IF NOT EXISTS OKTA_RAW_STREAM ON TABLE OKTA_SYSTEM_LOG_RAW;
+
+CREATE TASK IF NOT EXISTS OKTA_TO_CIM
+  WAREHOUSE = XDR_WH
+  SCHEDULE = '1 MINUTE'
+  WHEN SYSTEM$STREAM_HAS_DATA('OKTA_RAW_STREAM')
+AS
+INSERT INTO AUTHENTICATION
+  (event_id, _time, action, app, authentication_method, authentication_service,
+   dest, reason, signature, signature_id, src, user_name, user_id, user_agent,
+   vendor_product, host, source, sourcetype, index_name, _raw,
+   geo_city, geo_country, geo_lat, geo_lon)
+SELECT
+  v:uuid::STRING,
+  v:published::TIMESTAMP_LTZ,
+  IFF(v:outcome.result::STRING = 'SUCCESS', 'success', 'failure'),
+  'okta',
+  LOWER(v:authenticationContext.credentialType::STRING),
+  'Okta',
+  v:target[0].displayName::STRING,
+  v:outcome.reason::STRING,
+  v:displayMessage::STRING,
+  v:eventType::STRING,
+  v:client.ipAddress::STRING,
+  v:actor.alternateId::STRING,
+  v:actor.id::STRING,
+  v:client.userAgent.rawUserAgent::STRING,
+  'Okta', 'okta', 'okta:system_log', 'OktaIM2:log', 'security',
+  v,
+  v:client.geographicalContext.city::STRING,
+  v:client.geographicalContext.country::STRING,   -- country name; map to ISO-2 if needed
+  v:client.geographicalContext.geolocation.lat::FLOAT,
+  v:client.geographicalContext.geolocation.lon::FLOAT
+FROM OKTA_RAW_STREAM
+WHERE v:eventType::STRING LIKE ANY ('user.session.%', 'user.authentication.%',
+                                    'user.mfa.%', 'user.account.%');
+
+ALTER TASK OKTA_TO_CIM RESUME;
+```
+
+Admin/policy events (`policy.*`, `group.user_membership.*`, `system.api_token.*`) fit better in
+`CLOUD_API`; add a second `INSERT` for them. Validate field paths against a sample of your own events.
+
+**Expected latency (Okta event → finding in the console):**
+
+| Hop | Typical | Tunable |
+|---|---|---|
+| Okta → EventBridge (Log Streaming) | seconds | — |
+| EventBridge → Firehose → S3 | 60–300 s (Firehose buffer interval) | lower the buffer interval / size |
+| S3 → Snowpipe → raw table | ~30–60 s | — |
+| Stream → `OKTA_TO_CIM` task | ≤ 1 min | serverless task / triggered task |
+| Detections (`TASK_RUN_DETECTIONS`) | ≤ 5 min | `setup/09_scheduled_tasks.sql` |
+| Incident correlation | ≤ 15 min | `setup/09_scheduled_tasks.sql` |
+
+End to end you can expect about **2–8 minutes to a finding** and **up to about 20 minutes to a correlated incident**
+with the defaults. To get findings in under 2 minutes, shorten the Firehose buffer and the detection
+schedule. For faster delivery still, swap Firehose+Snowpipe for Snowpipe Streaming (a Kafka connector or SDK), which lands
+events in seconds.
+
 ## Detection Coverage
 
 | Category | Rules | MITRE Tactics |
