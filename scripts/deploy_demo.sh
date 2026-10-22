@@ -204,7 +204,7 @@ sql_file "$CHANNELS_SQL"
 
 for f in 12_api_udf 13_response_playbooks 14_platform_ops 15_platform_pro \
          16_attack_graph 18_controls 19_fp_suppression 20_live_feed \
-         21_cortex_agent 22_demo_seed 23_time_shift; do
+         24_agent_actions 21_cortex_agent 22_demo_seed 23_time_shift; do
     sql_file "setup/$f.sql"
 done
 

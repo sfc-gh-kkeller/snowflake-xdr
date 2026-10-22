@@ -15,8 +15,9 @@ const EXAMPLES = [
   "What happened with the user jsmith?",
   "Trace the attack path from host:10.1.5.107",
   "Which MITRE tactics have no detection coverage?",
+  "Create and enable a rule for external port scanning",
+  "Add 185.220.101.42 as a C2 IOC with severity 5",
   "Find alerts similar to SMB lateral movement",
-  "Which findings were already mitigated by existing controls?",
 ]
 
 const TOOL_LABELS: Record<string, string> = {
@@ -25,6 +26,13 @@ const TOOL_LABELS: Record<string, string> = {
   search_entity: "Entity search",
   ai_investigate_entity: "AI entity investigation",
   trace_attack_paths: "Attack-path trace",
+  create_detection_rule: "Created rule",
+  set_rule_enabled: "Changed rule state",
+  add_ioc: "Added IOC",
+  update_finding: "Updated finding",
+  set_incident_status: "Updated incident",
+  create_playbook: "Created playbook",
+  run_detections: "Ran detections",
   data_to_chart: "Chart",
 }
 
@@ -63,7 +71,7 @@ export function AskXdr() {
       <PageHeader
         persona="SOC Analyst"
         title="Ask XDR"
-        description="Chat with the XDR_ANALYST Cortex Agent. It orchestrates Cortex Analyst over the security semantic view, Cortex Search over findings, entity investigation and attack-path tracing."
+        description="Chat with the XDR_ANALYST Cortex Agent. It answers with Cortex Analyst, Cortex Search, entity investigation and attack-path tracing, and can act: create and enable rules, add IOCs, triage findings and incidents, create playbooks and run detections. Every action is logged in DASHBOARDS.AGENT_ACTION_LOG."
         actions={turns.length > 0 && (
           <Button size="sm" variant="outline" onClick={() => { setTurns([]); setError(null) }}>
             <RotateCcw className="h-3.5 w-3.5" /> New chat

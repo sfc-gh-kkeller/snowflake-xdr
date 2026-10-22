@@ -4,7 +4,7 @@
  * Minimal, safe markdown renderer for Cortex AI output (briefings, campaign
  * stories, agent answers). Renders React elements only — never raw HTML —
  * so model output cannot inject markup. Supports headings, bullet/numbered
- * lists, bold, inline code, fenced code, and paragraphs.
+ * lists, GFM tables, bold, inline code, fenced code, and paragraphs.
  */
 
 import React from "react"
@@ -30,12 +30,44 @@ function inline(text: string, keyBase: string): React.ReactNode[] {
   return out
 }
 
+/** Split a GFM table row into trimmed cells, ignoring the outer pipes. */
+function cells(row: string): string[] {
+  return row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim())
+}
+
+const TABLE_ROW = /^\s*\|.*\|\s*$/
+const TABLE_SEP = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/
+
 export function Markdown({ text, className = "" }: { text: string; className?: string }) {
   const lines = (text ?? "").replace(/\r\n/g, "\n").split("\n")
   const blocks: React.ReactNode[] = []
   let list: { ordered: boolean; items: string[] } | null = null
   let para: string[] = []
   let code: string[] | null = null
+  let table: string[][] | null = null
+
+  const flushTable = () => {
+    if (table) {
+      const k = `t${blocks.length}`
+      const [head, ...body] = table
+      blocks.push(
+        <div key={k} className="overflow-x-auto">
+          <table className="w-full border-collapse text-left text-xs">
+            <thead>
+              <tr>{head.map((c, i) => (
+                <th key={i} className="border-b border-border px-2 py-1.5 font-semibold">{inline(c, `${k}-h${i}`)}</th>
+              ))}</tr>
+            </thead>
+            <tbody>{body.map((r, ri) => (
+              <tr key={ri} className="border-b border-border/50 align-top">{head.map((_, ci) => (
+                <td key={ci} className="px-2 py-1.5">{inline(r[ci] ?? "", `${k}-${ri}-${ci}`)}</td>
+              ))}</tr>
+            ))}</tbody>
+          </table>
+        </div>)
+      table = null
+    }
+  }
 
   const flushPara = () => {
     if (para.length) {
@@ -55,7 +87,8 @@ export function Markdown({ text, className = "" }: { text: string; className?: s
     }
   }
 
-  for (const raw of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const raw = lines[li]
     const line = raw.trimEnd()
     if (code) {
       if (line.trim().startsWith("```")) {
@@ -64,6 +97,17 @@ export function Markdown({ text, className = "" }: { text: string; className?: s
       } else {
         code.push(raw)
       }
+      continue
+    }
+    if (table) {
+      if (TABLE_ROW.test(line)) { table.push(cells(line)); continue }
+      flushTable()
+    }
+    // A table starts with a header row immediately followed by a --- separator row
+    if (TABLE_ROW.test(line) && TABLE_SEP.test(lines[li + 1] ?? "")) {
+      flushPara(); flushList()
+      table = [cells(line)]
+      li++
       continue
     }
     if (line.trim().startsWith("```")) { flushPara(); flushList(); code = []; continue }
@@ -88,6 +132,6 @@ export function Markdown({ text, className = "" }: { text: string; className?: s
     }
   }
   if (code) blocks.push(<pre key={`k${blocks.length}`} className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs">{(code as string[]).join("\n")}</pre>)
-  flushPara(); flushList()
+  flushTable(); flushPara(); flushList()
   return <div className={`space-y-2 text-sm ${className}`}>{blocks}</div>
 }
