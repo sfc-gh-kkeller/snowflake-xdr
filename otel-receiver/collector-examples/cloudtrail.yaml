@@ -1,0 +1,69 @@
+# OpenTelemetry Collector -> Snowflake XDR: AWS CloudTrail from S3
+#
+# Reads CloudTrail log files from the trail's S3 bucket and ships one record per
+# CloudTrail event. The shipped aws_cloudtrail mapping turns them into
+# CLOUD_API rows (eventName, userIdentity, sourceIPAddress, errorCode, ...).
+#
+# Components (otelcol-contrib): awss3 receiver + awslogs_encoding extension
+# (format: cloudtrail). Give the collector an IAM role with s3:GetObject /
+# s3:ListBucket on the trail bucket (and the SQS queue if you use notifications).
+#
+# Note: awslogs_encoding decodes each CloudTrail event into a structured record
+# (fields as attributes). The shipped aws_cloudtrail mapping reads the raw event
+# JSON from the body. With the encoding below, either keep the raw event (see
+# transform) or let the Detection Autopilot propose a mapping for the
+# structured shape: register the source as e.g. aws_cloudtrail_otel and approve
+# its new_parser proposal in Data Sources.
+#
+#   export XDR_ENDPOINT=https://<ingress>.snowflakecomputing.app/v1/logs
+#   export XDR_PAT=<programmatic access token>
+#   export XDR_SOURCE_TOKEN=<from Data Sources > Register a source: aws_cloudtrail>
+#   otelcol-contrib --config cloudtrail.yaml
+
+receivers:
+  awss3:
+    s3downloader:
+      region: us-west-2
+      s3_bucket: my-org-cloudtrail
+      s3_prefix: AWSLogs/
+    # Recommended: S3 event notifications via SQS instead of polling
+    # sqs:
+    #   queue_url: https://sqs.us-west-2.amazonaws.com/123456789012/cloudtrail-events
+    #   region: us-west-2
+    # Each CloudTrail file holds {"Records": [...]}; the encoding splits it into one log per event
+    encodings:
+      - extension: awslogs_encoding/cloudtrail
+
+extensions:
+  awslogs_encoding/cloudtrail:
+    format: cloudtrail
+
+processors:
+  # Body becomes the event JSON; INGEST_OTLP_LOGS parses JSON text bodies
+  transform/json_body:
+    log_statements:
+      - context: log
+        statements:
+          - set(body, String(body)) where IsMap(body)
+  batch:
+    send_batch_size: 1000
+    timeout: 10s
+
+exporters:
+  otlphttp/xdr:
+    logs_endpoint: ${env:XDR_ENDPOINT}
+    compression: gzip
+    headers:
+      Authorization: Snowflake Token="${env:XDR_PAT}"
+      # A source token pins records to aws_cloudtrail regardless of service.name
+      X-XDR-Source-Token: ${env:XDR_SOURCE_TOKEN}
+    retry_on_failure:
+      enabled: true
+
+service:
+  extensions: [awslogs_encoding/cloudtrail]
+  pipelines:
+    logs:
+      receivers: [awss3]
+      processors: [transform/json_body, batch]
+      exporters: [otlphttp/xdr]

@@ -10,6 +10,8 @@ import { live, hunt, ask } from "@/lib/handlers/operate"
 import { detections, rules, response, posture } from "@/lib/handlers/engineer"
 import { autopilot } from "@/lib/handlers/autopilot"
 import { intel } from "@/lib/handlers/intel"
+import { sources } from "@/lib/handlers/sources"
+import { cases } from "@/lib/handlers/cases"
 
 export type Handler = (params: Record<string, unknown>) => Promise<unknown>
 
@@ -28,6 +30,8 @@ export const handlers: Record<string, Handler> = {
   ...posture,
   ...autopilot,
   ...intel,
+  ...sources,
+  ...cases,
 }
 
 export function getHandler(name: string): Handler | null {

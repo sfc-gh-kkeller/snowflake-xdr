@@ -1,8 +1,9 @@
 # Snowflake XDR - Security Analytics Platform
 
 A Snowflake-native XDR/SIEM: telemetry, detections, incident correlation,
-attack-graph analysis, Cortex AI agents, response automation and the analyst
-UI all run inside one Snowflake account — no external infrastructure.
+attack-graph analysis, Cortex AI agents, response automation, case management
+and the analyst UI all run inside one Snowflake account. Data comes in over
+standard OpenTelemetry (OTLP); incidents go out to Jira or ServiceNow.
 
 ## Screenshots
 
@@ -13,8 +14,10 @@ UI all run inside one Snowflake account — no external infrastructure.
 | ![Investigations](docs/screenshots/investigations.png) | ![Attack Graph](docs/screenshots/attack-graph.png) |
 | **Threat Hunting** | **Detections** |
 | ![Threat Hunting](docs/screenshots/hunt.png) | ![Detections](docs/screenshots/detections.png) |
-| **Security Posture** | |
-| ![Security Posture](docs/screenshots/posture.png) | |
+| **Security Posture** | **Cases & Tickets** |
+| ![Security Posture](docs/screenshots/posture.png) | ![Cases & Tickets](docs/screenshots/cases.jpg) |
+| **Data Sources (OpenTelemetry)** | |
+| ![Data Sources](docs/screenshots/sources.jpg) | |
 
 ## What's in it
 
@@ -40,6 +43,11 @@ UI all run inside one Snowflake account — no external infrastructure.
 - **Response** — playbooks firing email, Slack/Teams webhooks, external API calls
 - **XDR Console** — the analyst UI, a Snowflake App Runtime (Next.js) app with
   persona-grouped views for SOC analysts, detection engineers and the CISO
+- **OpenTelemetry ingestion** — an OTLP/HTTP receiver on Snowpark Container Services;
+  any OTel Collector ships logs in, CIM mappings feed every existing detection, and
+  the Detection Autopilot writes the mapping for sources it has never seen
+- **Cases & tickets** — NIST-style incident lifecycle with an audit trail, response tasks,
+  SLAs and Cortex-written incident reports, synced both ways with Jira or ServiceNow
 - **Splunk CIM compatible** — DB Connect can query `SPLUNK_VIEWS` directly
 
 ## Deploy end to end
@@ -61,6 +69,7 @@ scripts/deploy_demo.sh --fresh --yes-drop-everything   # drop and rebuild from z
 | `--legacy-streamlit` | Also redeploy the deprecated `XDR_SOC` Streamlit app (implied by `--fresh`) |
 | `--with-notifications` | Evaluate playbooks — sends real email / webhook / API calls |
 | `--events-per-day N` | Synthetic telemetry volume on a fresh build (default 5000) |
+| `--with-otel-receiver` | Build and deploy the OTLP receiver on Snowpark Container Services (needs Docker) |
 
 The runner goes through 8 phases: preflight, teardown (fresh only), schema and code (`setup/*.sql` in
 order), data (CTF dataset, synthetic telemetry, the 4-stage campaign, geo seed,
@@ -100,6 +109,7 @@ Console views:
 | SOC analyst | Overview | SOC Overview |
 | | Triage & Cases | Triage Queue, Case Management |
 | | Investigations | Incident View |
+| | Cases & Tickets (lifecycle, tasks, SLA, reports, Jira/ServiceNow sync, demo tracker) | new |
 | | Entity 360 | Entity Investigation |
 | | Attack Graph (lateral movement, door rattling, threat map) | Attack Graph, Threat Map |
 | | Live Tail | Live Tail |
@@ -109,6 +119,7 @@ Console views:
 | | Rules & IOCs | Rule Editor, IOC Manager |
 | | Detection Autopilot (change feed, approvals, autonomy policy) | new |
 | | Threat Intel & Confidence (spot checks, calibration, indicators, feeds, ATT&CK/KEV/Sigma) | new |
+| | Data Sources (OTLP endpoint, source health, CIM mappings, source tokens) | new |
 | | Response (playbooks, alert center, controls) | Response Automation, Alert Center |
 | CISO | Security Posture | Security Posture |
 
@@ -171,9 +182,9 @@ created suspended; resume them to let the autopilot run unattended. The digest g
 `setup/27_autopilot_demo.sql` resets the autopilot and runs two real cycles so the
 console opens with a genuine change history (the runner does this automatically).
 
-Background for the next phase: [`docs/otel_ingestion_plan.md`](docs/otel_ingestion_plan.md)
-describes out-of-the-box ingestion through an OpenTelemetry (OTLP) receiver, with new
-sources mapped into CIM by the same autopilot and policy (`new_parser`).
+The same engine maps new log sources into the CIM (`new_parser`, see
+[OpenTelemetry ingestion](#opentelemetry-ingestion); design notes in
+[`docs/otel_ingestion_plan.md`](docs/otel_ingestion_plan.md)).
 
 ## Threat intel that stays current, and false positives without blind spots
 
@@ -240,6 +251,143 @@ scheduled vulnerability scanner and the real C2 beacon from 10.1.1.10. The confi
 keeps the scanner suppressed (uncorroborated, spot-checked) but re-opens the machine-suppressed
 C2 findings because DET-016 beaconing corroborates them, and the autopilot asks a human to
 re-check the 13 earlier verdicts. Ask XDR: "Is automation hiding any real attacks?"
+
+## OpenTelemetry ingestion
+
+Out-of-the-box ingestion for any source an OpenTelemetry Collector can read
+(files, syslog, cloud audit logs, Kubernetes, ...). The XDR speaks plain OTLP, so
+there is no XDR agent or vendor SDK to install.
+
+```
+OTel Collector / OTLP SDK ──OTLP/HTTP + PAT──▶ XDR_OTLP_RECEIVER (SPCS) ──▶ RAW_LOGS.OTEL_LOGS
+                                                                                │ CIM mappings (1-min task)
+                                                                                ▼
+                     AUTHENTICATION · CLOUD_API · NETWORK_TRAFFIC · ... ──▶ every built-in + custom rule
+```
+
+| Piece | Where |
+|---|---|
+| Receiver: FastAPI on Snowpark Container Services, public endpoint `/v1/logs`, protobuf or JSON, gzip; 503 = retry | `otel-receiver/`, `setup/31_otel_receiver.sql`, `scripts/deploy_otel_receiver.sh` |
+| Landing table, source registry + tokens, `INGEST_OTLP_LOGS` (owner's rights: the service role can only call this) | `setup/30_otel_ingest.sql` |
+| Mapping engine: one SELECT per source → CIM table, incremental by watermark, rows tagged `index_name='otel'`, `source='otel:<id>'` for exact rollback | `APPLY_CIM_MAPPINGS`, `ACTIVATE_CIM_MAPPING`, `RETIRE_CIM_MAPPING` |
+| Shipped mappings | `okta` (System Log `user.session.*`), `linux_auth` (sshd), `aws_cloudtrail` |
+| Collector examples | `otel-receiver/collector-examples/` (Linux auth.log, CloudTrail from S3, Okta System Log forwarder) |
+
+**Deploy and send:**
+
+```bash
+scripts/deploy_otel_receiver.sh             # prints https://<ingress>.snowflakecomputing.app/v1/logs
+# a sender identity: service user + PAT restricted to XDR_OTLP_SENDER
+#   CREATE USER XDR_OTEL_COLLECTOR TYPE = SERVICE; GRANT ROLE XDR_OTLP_SENDER TO USER XDR_OTEL_COLLECTOR;
+#   ALTER USER XDR_OTEL_COLLECTOR ADD PROGRAMMATIC ACCESS TOKEN collector ROLE_RESTRICTION = 'XDR_OTLP_SENDER';
+python3 scripts/otel_replay.py --endpoint https://<ingress>/v1/logs --pat-file pat.txt   # demo attack stories
+```
+
+Collector exporter:
+
+```yaml
+exporters:
+  otlphttp/xdr:
+    logs_endpoint: https://<ingress>.snowflakecomputing.app/v1/logs
+    compression: gzip
+    headers:
+      Authorization: Snowflake Token="${env:XDR_PAT}"
+      X-XDR-Source-Token: ${env:XDR_SOURCE_TOKEN}   # optional, from Data Sources > Register a source
+```
+
+The ingress authenticates every request with Snowflake (a PAT for a user granted
+`XDR_OTLP_SENDER`; PATs need a network policy unless the user's authentication
+policy relaxes that). Without a source token, the resource attribute `service.name`
+names the source.
+
+**New sources map themselves.** A source XDR has never seen registers as
+`unmapped`. The next Detection Autopilot cycle (`new_parser`) reads sample records,
+has Cortex write the mapping SELECT and the target CIM table, and validates it:
+
+- it may only read `OTEL_LOGS`;
+- every column must exist in the target table;
+- the required fields (time, action, user / src / dest) must be at least 95% filled.
+
+The policy defaults to `propose_only`. Approving the proposal (in Data Sources,
+Detection Autopilot or Ask XDR) puts the mapping live and backfills everything
+already received. Rollback retires the mapping and deletes exactly the rows it
+produced.
+
+In the demo, an unknown key=value VPN log and a JSON firewall log were each mapped
+correctly on the first attempt, into AUTHENTICATION and NETWORK_TRAFFIC. DET-001
+then fired on the Okta and sshd brute-force stories without any rule changes.
+
+`deploy_demo.sh` seeds the same three stories through `INGEST_OTLP_LOGS`
+(`SEED_OTEL_DEMO`), so the demo works without the container.
+
+## Cases, tickets and incident reports
+
+`setup/32_incident_tracking.sql` and `setup/33_ticketing.sql`; console: **SOC Analyst → Cases & Tickets**.
+Design: [`docs/incident_integration_plan.md`](docs/incident_integration_plan.md).
+
+**Native case management.**
+
+- **Lifecycle:** `open → acknowledged → investigating → contained → eradicated → recovered → closed`.
+  Closing requires a resolution (`true_positive`, `benign`, `false_positive`, `duplicate`, `test`).
+- **Audit trail:** every change goes through `SET_INCIDENT_STATE`, `ASSIGN_INCIDENT`,
+  `ADD_INCIDENT_COMMENT` or `UPSERT_INCIDENT_TASK`, and lands in `INCIDENT_EVENTS` with the actor and
+  whether it was a human, the agent, the autopilot, a ticket system or the platform.
+- **SLAs:** acknowledge / contain / resolve targets per priority (`INCIDENT_SLA_POLICY`). Breaches
+  become events.
+- **Metrics:** `V_INCIDENT_METRICS` gives MTTA, MTTC and MTTR, SLA compliance and reopen rate.
+- **Incident report:** `GENERATE_INCIDENT_REPORT` writes Markdown with:
+  - executive summary;
+  - response times against SLA;
+  - what happened;
+  - kill chain, scope and evidence;
+  - response actions and the case timeline;
+  - root cause, lessons learned and detection gaps.
+
+  Every figure comes from SQL; Cortex only drafts the narrative from those facts.
+
+**Ticket sync** (`SYNC_TICKETS`, task `TASK_TICKET_SYNC`, every 2 minutes, created suspended):
+
+| Step | What happens |
+|---|---|
+| Route | Open incidents at or above a connection's priority (default P2) get a ticket, unless every finding in them was dismissed or is low confidence (phase 1.5 FP control keeps ticket noise down). A retry looks for the XDR reference first, so it never opens a duplicate. |
+| Push | `INCIDENT_OUTBOX`: create, comment, transition, attach report. Uses backoff, honours `Retry-After`, and records failures on the case. |
+| Poll / webhook | Remote state, assignee and comments land in `TICKET_INBOX`, deduplicated. Push uses `POST /v1/webhooks/{connection}` on the OTLP receiver (Snowflake PAT, optional HMAC `X-Hub-Signature`). |
+| Apply | Changes go through the lifecycle with actor type `ticket`. They are audited and never echoed back. New findings on a closed incident reopen it. |
+
+**Connectors:**
+
+- **Jira Cloud** (REST v3):
+  - ADF descriptions, labels `xdr-<incident_id>`;
+  - transitions discovered per workflow;
+  - report attachments.
+- **ServiceNow** (Table API):
+  - Security Incident Response `sn_si_incident`, or ITSM `incident`;
+  - `correlation_id` reference, priority via urgency/impact;
+  - states read from the instance's own `sys_choice`;
+  - close codes and work notes.
+- **mock:** a Jira-style tracker kept in Snowflake, so the round trip demos without credentials. In
+  the console's Demo tracker tab you play the Jira analyst.
+
+**Ownership and data rules.** Once a ticket exists, its workflow state is authoritative. XDR
+detection data is authoritative in the other direction. Only summaries and a console link leave
+Snowflake, unless a connection sets `include_raw_evidence`.
+
+Connect a real Jira:
+
+```sql
+ALTER SECRET SNOWFLAKE_XDR.INCIDENTS.JIRA_CREDENTIALS SET USERNAME = 'you@acme.com' PASSWORD = '<API token>';
+CALL SNOWFLAKE_XDR.INCIDENTS.CONFIGURE_TICKET_CONNECTION('jira', 'https://acme.atlassian.net', TRUE,
+     PARSE_JSON('{"project_key": "SEC"}'));   -- also allows egress to exactly that host
+```
+
+ServiceNow is the same, using `SERVICENOW_CREDENTIALS` and connection `servicenow`. The
+integration user needs `sn_si.integration_user` for SIR.
+
+The Jira and ServiceNow connectors follow the documented REST APIs but have not been run against
+a live site from this repo yet. The mock and webhook paths are tested end to end.
+
+Ask XDR can work cases too (tools `case_action`, `ticketing_status`): "comment on this incident,
+open a ticket and give me the key".
 
 ## Splunk DB Connect Integration
 
@@ -377,6 +525,8 @@ privilege escalation, insider exfiltration, web application exploitation — and
 snowflake-xdr/
 ├── scripts/
 │   ├── deploy_demo.sh          # end-to-end builder (idempotent / --fresh)
+│   ├── deploy_otel_receiver.sh # build + deploy the OTLP receiver (SPCS)
+│   ├── otel_replay.py          # send demo attack stories as OTLP
 │   └── reset_demo_clock.sh     # move demo timestamps to "now"
 ├── setup/                      # SQL, run in order by the runner
 │   ├── 00_ctf_schema.sql, 00b_ctf_load.sql    # CTF dataset (data/ctf/*.csv.gz)
@@ -387,8 +537,11 @@ snowflake-xdr/
 │   ├── 22, 23                  # demo seed state, demo clock + dedupe
 │   ├── 24, 25                  # agent action tools, ready-made custom rules
 │   ├── 26, 27                  # Detection Autopilot, autopilot demo state
-│   └── 28, 29                  # threat intel feeds, calibrated confidence + FP control
+│   ├── 28, 29                  # threat intel feeds, calibrated confidence + FP control
+│   ├── 30, 31                  # OpenTelemetry ingestion + CIM mappings, OTLP receiver (SPCS)
+│   └── 32, 33                  # case management (lifecycle, SLA, reports), Jira/ServiceNow ticket sync
 ├── data/ctf/                   # compressed CTF CSVs
+├── otel-receiver/              # OTLP/HTTP receiver container + collector examples
 ├── xdr-console/                # XDR Console (Snowflake App Runtime, Next.js)
 ├── streamlit/                  # deprecated XDR_SOC Streamlit app
 └── docs/                       # demo walkthrough, story, Splunk queries
@@ -401,3 +554,4 @@ snowflake-xdr/
 - Cortex AI access (COMPLETE, AI_CLASSIFY, AI_SIMILARITY, Cortex Search, Cortex Agents)
 - Snowflake App Runtime enabled on the account (console); Streamlit in Snowflake (legacy app)
 - Scheduled tasks are created suspended; the UI runs detections on demand
+- OTLP receiver (optional): Snowpark Container Services and Docker (linux/amd64 build)

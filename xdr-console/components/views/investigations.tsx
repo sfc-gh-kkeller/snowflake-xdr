@@ -91,7 +91,9 @@ function IncidentDetail({ incidentId, onClose }: { incidentId: string; onClose: 
         actions={<>
           <ActionButton action={setStatus} params={{ incident_id: incidentId, status: "investigating" }}>Investigating</ActionButton>
           <ActionButton action={setStatus} params={{ incident_id: incidentId, status: "contained" }}>Contained</ActionButton>
-          <ActionButton action={setStatus} params={{ incident_id: incidentId, status: "closed" }} confirm="Close this incident?">Close</ActionButton>
+          <ActionButton action={setStatus} params={{ incident_id: incidentId, status: "closed", resolution: "true_positive" }}
+            confirm="Close this incident as a true positive? Use the Cases view for other resolutions.">Close</ActionButton>
+          <Link href={`/cases?id=${incidentId}`} className="rounded-md border border-border px-2.5 py-1 text-xs hover:bg-muted">Case &amp; ticket</Link>
           <Button size="sm" variant="ghost" onClick={onClose}>✕</Button>
         </>}
         bodyClassName="space-y-3"

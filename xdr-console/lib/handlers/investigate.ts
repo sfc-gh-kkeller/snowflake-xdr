@@ -4,7 +4,7 @@
  * 17_attack_graph.py and 2_threat_map.py.
  */
 
-import { rows, one, scalar, str, int, id, oneOf, InputError, normalizeTimestamp } from "@/lib/xdr"
+import { rows, one, scalar, str, int, id, oneOf, InputError, normalizeTimestamp, type Row } from "@/lib/xdr"
 import { entityKind, type LayoutNode, type LayoutEdge } from "@/lib/graph"
 
 // ---------------------------------------------------------------------------
@@ -62,14 +62,17 @@ export const investigations = {
     return { text: r?.story ?? "" }
   },
 
+  /** Goes through the incident lifecycle (audit trail + ticket sync), not a direct update. */
   "incidents.setStatus": async (p: Record<string, unknown>) => {
     const iid = id(p, "incident_id")
-    const status = oneOf(p, "status", ["open", "investigating", "contained", "closed"] as const)
-    await rows(`
-      UPDATE SNOWFLAKE_XDR.INCIDENTS.INCIDENTS
-      SET status = ?, closed_at = IFF(? = 'closed', CURRENT_TIMESTAMP(), NULL)
-      WHERE incident_id = ?`, [status, status, iid])
-    return { message: `Incident ${status}` }
+    const status = oneOf(p, "status", ["open", "acknowledged", "investigating", "contained", "eradicated", "recovered", "closed"] as const)
+    const resolution = p.resolution === undefined || p.resolution === ""
+      ? null : oneOf(p, "resolution", ["true_positive", "benign", "false_positive", "duplicate", "test"] as const)
+    const actor = typeof p.__actor === "string" && /^[A-Za-z0-9_.@$-]{1,255}$/.test(p.__actor) ? p.__actor : null
+    const r = await scalar<Row>("CALL SNOWFLAKE_XDR.INCIDENTS.SET_INCIDENT_STATE(?, ?, ?, ?, 'human', ?, NULL)",
+      [iid, status, str(p, "reason", { max: 1000 }) || null, actor, resolution])
+    if (!r?.ok) throw new InputError(String(r?.message ?? "status change failed"))
+    return { message: String(r.message) }
   },
 }
 

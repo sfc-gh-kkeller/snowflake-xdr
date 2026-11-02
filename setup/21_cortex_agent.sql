@@ -39,9 +39,11 @@ instructions:
       create_playbook, run_detections, and for the Detection Autopilot:
       autopilot_status, decide_autopilot_change, set_autopilot_policy,
       run_autopilot_cycle, and for threat intel and false positives:
-      threat_intel_status, confidence_status, decide_spot_check. Things you genuinely cannot do: edit raw
-      telemetry, delete rules or data, change user access, or deploy new data
-      sources (say that plainly and give the next step instead).
+      threat_intel_status, confidence_status, decide_spot_check, for data
+      sources: data_sources_status, and for cases and tickets: case_action,
+      ticketing_status. Things you genuinely cannot do: edit raw
+      telemetry, delete rules or data, change user access, or install a collector
+      (say that plainly and give the next step instead).
     - After an action, report exactly what changed using the tool output: IDs,
       names, enabled state, test result. If a tool returns an error or
       "not found", say so; do not claim success.
@@ -91,6 +93,13 @@ instructions:
     - "What's new in threat intel / feeds / new KEVs / new ATT&CK techniques" -> threat_intel_status.
     - "What did automation suppress / spot checks / is the FP model hiding anything" -> confidence_status;
       report suppression quality (miss rate) and open spot checks with their review_id.
+    - "Which data sources / is X sending / new log source / OTel / ingestion lag" -> data_sources_status.
+      New sources register themselves; a pending mapping proposal is an autopilot change (change_id) that
+      decide_autopilot_change approves or rejects. Approving maps everything already received.
+    - Case work (timeline, comment, assign, add a response task, open a Jira/ServiceNow ticket, incident
+      report) -> case_action with the exact incident_id. create_ticket returns the ticket key and URL: report
+      them. Once a ticket exists its workflow state is authoritative; say so if asked to change status.
+      "Is the ticket in sync / which tickets failed" -> ticketing_status.
     - Recording a spot-check verdict -> decide_spot_check with the exact review_id. A true_positive
       verdict revokes the suppression and re-opens what it hid; say so.
   sample_questions:
@@ -256,7 +265,7 @@ tools:
   - tool_spec:
       type: "generic"
       name: "set_incident_status"
-      description: "ACTION. Move an incident to open, investigating, contained, or closed."
+      description: "ACTION. Move an incident through its lifecycle: open, acknowledged, investigating, contained, eradicated, recovered, closed (closes as true_positive). Audited and sent to linked tickets."
       input_schema:
         type: object
         properties:
@@ -265,7 +274,7 @@ tools:
             description: "Exact incident_id (look it up first if not given)"
           p_status:
             type: string
-            description: "One of: open, investigating, contained, closed"
+            description: "One of: open, acknowledged, investigating, contained, eradicated, recovered, closed"
         required: [p_incident_id, p_status]
   - tool_spec:
       type: "generic"
@@ -369,6 +378,37 @@ tools:
         properties: {}
   - tool_spec:
       type: "generic"
+      name: "case_action"
+      description: "ACTION. Work a case: timeline (lifecycle events, comments, tasks, tickets, attacker activity), comment, assign, add_task, create_ticket (Jira / ServiceNow / demo tracker; text = connection_id or empty for the default), report (Cortex incident report from SQL facts, attached to linked tickets)."
+      input_schema:
+        type: object
+        properties:
+          p_incident_id:
+            type: string
+            description: "Exact incident_id"
+          p_action:
+            type: string
+            description: "timeline | comment | assign | add_task | create_ticket | report"
+          p_text:
+            type: string
+            description: "comment text, assignee, task title, or connection_id for create_ticket; empty otherwise"
+        required: [p_incident_id, p_action, p_text]
+  - tool_spec:
+      type: "generic"
+      name: "ticketing_status"
+      description: "Ticket integrations: connections (Jira, ServiceNow, demo tracker), linked tickets by sync status, pending/failed outbound updates, pending inbound changes."
+      input_schema:
+        type: object
+        properties: {}
+  - tool_spec:
+      type: "generic"
+      name: "data_sources_status"
+      description: "OpenTelemetry data sources: per source status (mapped, unmapped, mapping_proposed, paused), records in 24h, last record, ingest lag, CIM mappings (target table, rows, errors) and pending autopilot mapping proposals with their change_id."
+      input_schema:
+        type: object
+        properties: {}
+  - tool_spec:
+      type: "generic"
       name: "decide_spot_check"
       description: "ACTION. Record a human verdict on a spot check of an automatically dismissed finding. true_positive revokes the suppression, re-opens every finding it hid and retrains the FP model; false_positive or benign confirms the suppression."
       input_schema:
@@ -460,6 +500,18 @@ tool_resources:
   confidence_status:
     type: procedure
     identifier: "SNOWFLAKE_XDR.DETECTIONS.CONFIDENCE_STATUS"
+    execution_environment: {type: warehouse, warehouse: XDR_WH}
+  case_action:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DASHBOARDS.AGENT_CASE_ACTION"
+    execution_environment: {type: warehouse, warehouse: XDR_WH, query_timeout: 300}
+  ticketing_status:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.INCIDENTS.TICKETING_STATUS"
+    execution_environment: {type: warehouse, warehouse: XDR_WH}
+  data_sources_status:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.REFERENCE.DATA_SOURCES_STATUS"
     execution_environment: {type: warehouse, warehouse: XDR_WH}
   decide_spot_check:
     type: procedure

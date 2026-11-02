@@ -23,6 +23,8 @@
 #                           (implied by --fresh, which would otherwise lose it)
 #   --with-notifications    evaluate response playbooks (sends real email /
 #                           webhook / API calls)
+#   --with-otel-receiver    build and deploy the OTLP receiver on Snowpark
+#                           Container Services (needs Docker; see otel-receiver/)
 #   --events-per-day N      synthetic telemetry volume (default: 5000)
 #   -h, --help              show this help
 #
@@ -41,6 +43,7 @@ CONN="aws_demo_kevin"
 FRESH=0
 CONFIRM_DROP=0
 SKIP_APP=0
+OTEL_RECEIVER=0
 SKIP_AI=0
 LEGACY=0
 NOTIFY=0
@@ -55,6 +58,7 @@ while [[ $# -gt 0 ]]; do
         --fresh)               FRESH=1; shift ;;
         --yes-drop-everything) CONFIRM_DROP=1; shift ;;
         --skip-app)            SKIP_APP=1; shift ;;
+        --with-otel-receiver)  OTEL_RECEIVER=1; shift ;;
         --skip-ai)             SKIP_AI=1; shift ;;
         --legacy-streamlit)    LEGACY=1; shift ;;
         --with-notifications)  NOTIFY=1; shift ;;
@@ -204,7 +208,7 @@ sql_file "$CHANNELS_SQL"
 
 for f in 12_api_udf 13_response_playbooks 14_platform_ops 15_platform_pro \
          16_attack_graph 18_controls 19_fp_suppression 20_live_feed \
-         24_agent_actions 26_autopilot 28_threat_intel 29_confidence 21_cortex_agent 22_demo_seed 23_time_shift; do
+         24_agent_actions 26_autopilot 28_threat_intel 29_confidence 30_otel_ingest 32_incident_tracking 33_ticketing 21_cortex_agent 22_demo_seed 23_time_shift; do
     sql_file "setup/$f.sql"
 done
 
@@ -272,6 +276,16 @@ else
     sql_file "setup/27_autopilot_demo.sql"
 fi
 sql_call "EMIT_LIVE_EVENTS"          "CALL SNOWFLAKE_XDR.RAW_LOGS.EMIT_LIVE_EVENTS(3)"
+# OpenTelemetry: three sources through the real OTLP ingest path, mapped into the CIM (30_otel_ingest.sql)
+sql_call "SEED_OTEL_DEMO"            "CALL SNOWFLAKE_XDR.RAW_LOGS.SEED_OTEL_DEMO()"
+sql_call "DETECT_BRUTE_FORCE (OTel)" "CALL SNOWFLAKE_XDR.DETECTIONS.DETECT_BRUTE_FORCE()"
+# Cases: route P1/P2 incidents to the demo tracker, create the tickets, check SLAs (32/33_*.sql)
+sql_call "SYNC_TICKETS"              "CALL SNOWFLAKE_XDR.INCIDENTS.SYNC_TICKETS('all')"
+if [[ $OTEL_RECEIVER -eq 1 ]]; then
+    log "deploying the OTLP receiver (Snowpark Container Services)"
+    scripts/deploy_otel_receiver.sh -c "$CONN" >> "$RUN_LOG" 2>&1 || fail "deploy_otel_receiver.sh (see $RUN_LOG)"
+    log "     -> $(grep -o 'Receiver ready: .*' "$RUN_LOG" | tail -1)"
+fi
 if [[ $NOTIFY -eq 1 ]]; then
     sql_call "EVALUATE_ALL_NEW_FINDINGS" "CALL SNOWFLAKE_XDR.RESPONSE.EVALUATE_ALL_NEW_FINDINGS()"
 else
@@ -338,6 +352,8 @@ check "incidents"                       "$(scalar "SELECT COUNT(*) FROM SNOWFLAK
 check "attack graph edges"              "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.DETECTIONS.ATTACK_PATH_EDGES")" 1
 check "findings mitigated by controls"  "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS WHERE disposition = 'mitigated_by_control'")" 1
 check "findings auto-suppressed (FP)"   "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS WHERE triage_notes LIKE '%Auto-suppressed by FP model%'")" 1
+check "OTel records mapped into CIM"    "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION WHERE index_name = 'otel'")" 1
+check "incidents with a ticket"         "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.INCIDENTS.INCIDENT_TICKETS WHERE sync_status = 'ok'")" 1
 check "live-feed events (last hour)"    "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.DETECTIONS.V_LIVE_FEED")" 1
 HOPS=$(scalar "CALL SNOWFLAKE_XDR.DETECTIONS.TRACE_ATTACK_PATHS('host:10.1.5.107')" | python3 -c '
 import json, sys

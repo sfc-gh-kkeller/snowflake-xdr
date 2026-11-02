@@ -1,6 +1,20 @@
 # Phase 2 plan: out-of-the-box ingestion with OpenTelemetry
 
-Status: plan, not built. Phase 1 (the Detection Autopilot) is in `setup/26_autopilot.sql`.
+Status: built (logs). See `setup/30_otel_ingest.sql`, `setup/31_otel_receiver.sql`,
+`otel-receiver/` and the README section "OpenTelemetry ingestion".
+
+Differences from this plan:
+
+- The receiver writes through an owner's-rights procedure (`INGEST_OTLP_LOGS`) rather
+  than Snowpipe Streaming. That is simpler, has no client SDK in the container, and
+  gives seconds of latency at demo volumes. Snowpipe Streaming remains the scale-out
+  path.
+- Mappings are SELECT statements applied by a 1-minute task with a watermark, not
+  dynamic tables, so mappings can be activated, backfilled and rolled back row-exactly.
+- Only `/v1/logs` is implemented; traces and metrics are not.
+- The landing table is `30_otel_ingest.sql`, not `28_` (that number went to threat intel).
+
+Next phase: [`incident_integration_plan.md`](incident_integration_plan.md).
 
 ## Goal
 

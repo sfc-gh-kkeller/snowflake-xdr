@@ -661,6 +661,13 @@ def go_live(s, change):
                     status_reason = 'allowlisted after analyst false positives', updated_at = CURRENT_TIMESTAMP()
                   WHERE ioc_type = ? AND LOWER(ioc_value) = LOWER(?)""", params=[ev["ioc_type"], ev["ioc_value"]]).collect()
         return f"{ev['ioc_value']} allowlisted"
+    if ct == "new_parser":
+        r = one(s, f"CALL {DB}.REFERENCE.ACTIVATE_CIM_MAPPING(?, TRUE)", [evidence_of(change)["mapping_id"]])
+        res = json.loads(list(r.values())[0])
+        if not res.get("ok"):
+            return "activation failed: " + str(res.get("message"))
+        mapped = one(s, f"CALL {DB}.REFERENCE.APPLY_CIM_MAPPINGS()")
+        return res["message"] + "; backfill " + str(list(mapped.values())[0])[:200]
     if ct == "recheck_verdicts":
         ev = evidence_of(change)
         n = s.sql(f"""UPDATE {DB}.DETECTIONS.DETECTION_FINDINGS SET status = 'new', disposition = NULL,
@@ -699,6 +706,9 @@ def revert(s, change):
         return "indicator restored"
     if ct == "recheck_verdicts":
         return "re-check cannot be rolled back; record new verdicts in Triage"
+    if ct == "new_parser":
+        r = one(s, f"CALL {DB}.REFERENCE.RETIRE_CIM_MAPPING(?, TRUE)", [ev["mapping_id"]])
+        return json.loads(list(r.values())[0]).get("message", "mapping retired")
     if before:
         snapshot(s, target)
         s.sql(f"""UPDATE {CR} SET code = ?, threshold_count = ?, version = version + 1,
@@ -979,8 +989,99 @@ def cycle(s):
     # 8. Human-in-the-loop FP control from analyst verdicts
     fp_control(s, pol, cfg, busy_targets, handle)
 
+    # 9. new_parser: map unmapped OpenTelemetry sources into the CIM
+    pp = pol.get("new_parser") or {}
+    if pp.get("MODE") != "off":
+        try:
+            new_parsers(s, cfg, pp, handle, summary)
+        except Exception as e:  # OTel ingestion not deployed yet
+            summary.setdefault("skipped", []).append("new_parser: " + str(e)[:120])
+
     notify(s, summary)
     return summary
+
+
+PARSER_TARGETS = {
+    "AUTHENTICATION": "logins, sign-ins, MFA, VPN/SSO authentication results",
+    "CLOUD_API": "cloud control-plane API calls (AWS/Azure/GCP audit logs)",
+    "NETWORK_TRAFFIC": "firewall / flow logs: connections between hosts",
+    "DNS_ACTIVITY": "DNS queries and answers",
+    "WEB_ACTIVITY": "HTTP requests, proxy and WAF logs",
+    "ENDPOINT_PROCESSES": "process starts with command lines",
+    "ENDPOINT_FILESYSTEM": "file reads/writes/creates",
+    "INTRUSION_DETECTION": "IDS/IPS alerts with signatures",
+}
+
+
+def new_parsers(s, cfg, pol, handle, summary):
+    """Cortex writes a CIM mapping for each unmapped OTel source; validated, then decided by policy."""
+    srcs = rows(s, f"""SELECT s.source_id, s.name, COUNT(o.otel_id) AS n
+                     FROM {DB}.REFERENCE.OTEL_SOURCES s JOIN {DB}.RAW_LOGS.OTEL_LOGS o ON o.source_id = s.source_id
+                     WHERE s.status = 'unmapped'
+                       AND NOT EXISTS (SELECT 1 FROM {CH} c WHERE c.change_type = 'new_parser'
+                                         AND c.evidence:source_id::VARCHAR = s.source_id
+                                         AND (c.status IN ('proposed', 'shadow')
+                                              OR (c.status IN ('rejected', 'failed')
+                                                  AND c.updated_at > DATEADD('day', -2, CURRENT_TIMESTAMP()))))
+                     GROUP BY 1, 2 HAVING COUNT(o.otel_id) >= 3 LIMIT {cap(pol)}""")
+    for src in srcs:
+        sid = src["SOURCE_ID"]
+        sample = rows(s, f"""SELECT event_time, severity_text, body, attributes, resource FROM {DB}.RAW_LOGS.OTEL_LOGS
+                            WHERE source_id = ? ORDER BY received_at DESC LIMIT 8""", [sid])
+        target_cols = {t: [r["COLUMN_NAME"].lower() for r in rows(s, f"""SELECT column_name FROM {DB}.INFORMATION_SCHEMA.COLUMNS
+                           WHERE table_schema = 'RAW_LOGS' AND table_name = ? AND column_name NOT IN
+                           ('EVENT_ID', 'INDEX_NAME', 'SOURCE', 'INGESTION_TIME') ORDER BY ordinal_position""", [t])]
+                       for t in PARSER_TARGETS}
+        feedback, hist = "", []
+        for attempt in range(1, 4):
+            prompt = (
+                "You map a new log source into a Splunk-CIM style security data model in Snowflake. Source "
+                f"'{sid}' lands OpenTelemetry log records in SNOWFLAKE_XDR.RAW_LOGS.OTEL_LOGS with columns: "
+                "event_time TIMESTAMP_LTZ, severity_text, body VARIANT (string, or parsed JSON object), "
+                "attributes VARIANT (object), resource VARIANT (object, e.g. resource:\"host.name\"), source_id.\n"
+                "Sample records (newest first):\n" + json.dumps(sample, default=str)[:6000] +
+                "\n\nPick the ONE best target table and write a single SELECT that maps this source into it.\n"
+                "Target tables (purpose: columns):\n" +
+                "\n".join(f"{t} ({d}): {', '.join(target_cols[t])}" for t, d in PARSER_TARGETS.items()) +
+                "\n\nRules: read only SNOWFLAKE_XDR.RAW_LOGS.OTEL_LOGS with WHERE source_id = '" + sid + "'; alias every "
+                "column to a target column name; always include _time; normalise action to success/failure (or "
+                "allowed/blocked for network) when the data says so; parse key=value text bodies with "
+                "REGEXP_SUBSTR(body::VARCHAR, 'key=([^ ]+)', 1, 1, 'e', 1); in Snowflake string literals write "
+                "regex backslashes doubled; set vendor_product, sourcetype and _raw (body::VARCHAR). "
+                "Only map records that belong in the target table (filter others out)." + feedback +
+                '\nReturn ONLY JSON: {"target_table": "...", "mapping_sql": "...", "rationale": "..."}')
+            try:
+                j = complete(s, cfg.get("model", "claude-sonnet-4-5"), prompt)
+            except Exception as e:
+                hist.append({"attempt": attempt, "error": str(e)[:200]})
+                feedback = "\nReturn valid JSON only."
+                continue
+            tgt = (j.get("target_table") or "").upper()
+            sql = re.sub(r";\s*$", "", (j.get("mapping_sql") or "").strip())
+            val = one(s, f"CALL {DB}.REFERENCE.VALIDATE_CIM_MAPPING(?, ?, ?)", [tgt, sql, sid])
+            val = json.loads(list(val.values())[0])
+            if not val.get("ok"):
+                hist.append({"attempt": attempt, "target": tgt, "error": str(val.get("error"))[:400]})
+                feedback = (f"\n\nYour previous mapping was rejected: {val.get('error')}. Fix it."
+                            + (f" Valid columns: {val.get('target_columns')}" if val.get("target_columns") else ""))
+                continue
+            mid = one(s, "SELECT UUID_STRING() AS id")["ID"]
+            s.sql(f"""INSERT INTO {DB}.REFERENCE.CIM_MAPPINGS (mapping_id, source_id, target_table, mapping_sql, status,
+                        created_by, validation) SELECT ?, ?, ?, ?, 'draft', 'autopilot', PARSE_JSON(?)""",
+                  params=[mid, sid, tgt, sql, json.dumps(val, default=str)]).collect()
+            s.sql(f"UPDATE {DB}.REFERENCE.OTEL_SOURCES SET status = 'mapping_proposed', kind = COALESCE(NULLIF(kind, 'unknown'), ?) "
+                  f"WHERE source_id = ?", params=[tgt.lower(), sid]).collect()
+            hist.append({"attempt": attempt, "ok": True})
+            handle("new_parser", f"Map new source {sid} into {tgt}",
+                   j.get("rationale") or f"{src['N']} records from {sid} have no CIM mapping yet.",
+                   target=None, evidence={"source_id": sid, "mapping_id": mid, "target_table": tgt, "sql": sql,
+                                          "validation": val, "records": src["N"], "attempts": hist},
+                   ok=True, reason=f"validated on {val.get('rows_sampled')} records; required fields filled")
+            break
+        else:
+            record(s, "new_parser", pol.get("MODE"), "failed", f"Could not map source {sid}",
+                   "No mapping passed validation.", evidence={"source_id": sid, "attempts": hist})
+            summary["failed"].append("new_parser " + sid)
 
 
 def sigma_reference(s, g):
@@ -1216,6 +1317,11 @@ def decide(s, change_id, action, note):
     if action == "reject":
         if st not in OPEN:
             return {"ok": False, "message": f"cannot reject a change in status {st}"}
+        if ct == "new_parser":
+            s.sql(f"UPDATE {DB}.REFERENCE.CIM_MAPPINGS SET status = 'retired' WHERE mapping_id = ? AND status = 'draft'",
+                  params=[evidence_of(ch).get("mapping_id")]).collect()
+            s.sql(f"UPDATE {DB}.REFERENCE.OTEL_SOURCES SET status = 'unmapped' WHERE source_id = ?",
+                  params=[evidence_of(ch).get("source_id")]).collect()
         if ch["RULE_ID"]:
             if ct == "new_rule":
                 s.sql(f"DELETE FROM {DB}.DETECTIONS.SHADOW_FINDINGS WHERE rule_id = ?", params=[ch["RULE_ID"]]).collect()

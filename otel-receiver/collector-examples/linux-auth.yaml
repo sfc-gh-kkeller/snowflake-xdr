@@ -1,0 +1,55 @@
+# OpenTelemetry Collector -> Snowflake XDR: Linux auth.log (sshd, sudo)
+#
+# Tails /var/log/auth.log (Debian/Ubuntu) or /var/log/secure (RHEL) and ships
+# each line to the XDR receiver. The shipped linux_auth mapping turns sshd
+# "Failed password / Accepted / Invalid user" lines into AUTHENTICATION rows,
+# so DET-001 brute force and the other identity rules run on them.
+#
+#   export XDR_ENDPOINT=https://<ingress>.snowflakecomputing.app/v1/logs
+#   export XDR_PAT=<programmatic access token, user granted XDR_OTLP_SENDER>
+#   otelcol-contrib --config linux-auth.yaml
+
+receivers:
+  filelog/auth:
+    include: [/var/log/auth.log, /var/log/secure]
+    start_at: end
+    include_file_name: true
+    operators:
+      # Keep the syslog timestamp as the record time
+      - type: regex_parser
+        regex: '^(?P<ts>\w{3}\s+\d+\s[\d:]{8})\s(?P<host>\S+)\s(?P<msg>.*)$'
+        timestamp:
+          parse_from: attributes.ts
+          layout_type: strptime
+          layout: '%b %e %H:%M:%S'
+      - type: move
+        from: attributes.msg
+        to: body
+
+processors:
+  resourcedetection:
+    detectors: [system]          # sets host.name -> dest in the CIM
+  resource:
+    attributes:
+      - key: service.name        # names the XDR source (or send X-XDR-Source-Token)
+        value: linux_auth
+        action: upsert
+  batch:
+    send_batch_size: 500
+    timeout: 5s
+
+exporters:
+  otlphttp/xdr:
+    logs_endpoint: ${env:XDR_ENDPOINT}
+    compression: gzip
+    headers:
+      Authorization: Snowflake Token="${env:XDR_PAT}"
+    retry_on_failure:
+      enabled: true              # the receiver answers 503 while Snowflake is busy
+
+service:
+  pipelines:
+    logs:
+      receivers: [filelog/auth]
+      processors: [resourcedetection, resource, batch]
+      exporters: [otlphttp/xdr]
