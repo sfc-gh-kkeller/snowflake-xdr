@@ -18,6 +18,24 @@ const SEVERITIES = ["5", "4", "3", "2", "1"] as const
 const CATEGORIES = ["all", "identity", "endpoint", "network", "cloud", "application", "custom"] as const
 const SOURCES = ["all", "stored_procedure", "custom_rule", "attack_graph", "ml_anomaly", "ai_detection_agent", "ai_hunting_agent"] as const
 const DISPOSITIONS = ["", "true_positive", "false_positive", "benign", "mitigated_by_control"] as const
+const BANDS = ["high", "medium", "low"] as const
+
+const BAND_CLS: Record<string, string> = {
+  high: "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300",
+  medium: "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  low: "border-slate-500/40 bg-slate-500/10 text-slate-600 dark:text-slate-300",
+}
+
+/** Calibrated confidence that the finding is real (29_confidence.sql). */
+export function ConfidenceBadge({ band, score }: { band: unknown; score: unknown }) {
+  if (!band) return <span className="text-[11px] text-muted-foreground">unscored</span>
+  const b = String(band)
+  return (
+    <span title="Calibrated confidence that this is real activity" className={`inline-flex whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium ${BAND_CLS[b] ?? ""}`}>
+      {b} {score !== null && score !== undefined ? `${Math.round(Number(score) * 100)}%` : ""}
+    </span>
+  )
+}
 
 type Status = (typeof STATUSES)[number]
 type Sev = (typeof SEVERITIES)[number]
@@ -27,6 +45,7 @@ export function Triage() {
   const router = useRouter()
   const [statuses, setStatuses] = useState<Status[]>(["new", "investigating"])
   const [severities, setSeverities] = useState<Sev[]>(["5", "4", "3"])
+  const [bands, setBands] = useState<(typeof BANDS)[number][]>([])
   const [category, setCategory] = useState<(typeof CATEGORIES)[number]>("all")
   const [source, setSource] = useState<(typeof SOURCES)[number]>("all")
   const [search, setSearch] = useState("")
@@ -39,7 +58,7 @@ export function Triage() {
     return () => clearTimeout(t)
   }, [search])
 
-  const filter = { statuses, severities, category, source, search: debounced }
+  const filter = { statuses, severities, bands, category, source, search: debounced }
   const list = useXdr("triage.list", filter)
   const invalidate = { invalidate: ["triage.", "overview."] }
   const trainFp = useXdrAction("triage.trainFp", invalidate)
@@ -69,18 +88,19 @@ export function Triage() {
       <PageHeader
         persona="SOC Analyst"
         title="Triage & Cases"
-        description="Risk-ranked findings with Cortex AI triage, the learned false-positive model and compensating-control coverage. Click a finding to work the case."
+        description="Findings ranked by severity x calibrated confidence. Confidence combines the rule's measured precision, entity history, corroboration, incidents, threat-intel confidence and the AI second opinion. Click a finding to see why."
         actions={<>
           <ActionButton action={trainFp}>Train FP model</ActionButton>
-          <ActionButton action={scoreFp}>Apply FP scoring</ActionButton>
+          <ActionButton action={scoreFp}>Score confidence</ActionButton>
           <ActionButton action={assess}>Assess control coverage</ActionButton>
         </>}
       />
       <ActionResult action={trainFp} /><ActionResult action={scoreFp} /><ActionResult action={assess} />
 
-      <Panel bodyClassName="grid gap-3 md:grid-cols-2 xl:grid-cols-[auto_auto_10rem_12rem_1fr]">
+      <Panel bodyClassName="grid gap-3 md:grid-cols-2 xl:grid-cols-[auto_auto_auto_10rem_12rem_1fr]">
         <Field label="Status"><Chips options={STATUSES} value={statuses} onChange={setStatuses} /></Field>
         <Field label="Severity"><Chips options={SEVERITIES} value={severities} onChange={setSeverities} /></Field>
+        <Field label="Confidence"><Chips options={BANDS} value={bands} onChange={setBands} /></Field>
         <Field label="Category"><Select value={category} onChange={setCategory} options={CATEGORIES} /></Field>
         <Field label="Detection source"><Select value={source} onChange={setSource} options={SOURCES} /></Field>
         <Field label="Search entity / description">
@@ -109,6 +129,7 @@ export function Triage() {
                 empty="Queue is clear for these filters."
                 columns={[
                   { key: "severity", label: "Sev", render: (r) => <SeverityBadge severity={r.severity} /> },
+                  { key: "conf_score", label: "Confidence", render: (r) => <ConfidenceBadge band={r.conf_band} score={r.conf_score} />, sortValue: (r) => r.conf_score },
                   { key: "risk_score", label: "Risk", align: "right", render: (r) => fmtNum(r.risk_score, 0) },
                   { key: "rule_id", label: "Rule", className: "font-mono text-xs whitespace-nowrap" },
                   { key: "entity", label: "Entity", className: "font-mono text-xs" },
@@ -178,7 +199,7 @@ function CaseDetail({ findingId, onClose }: { findingId: string; onClose: () => 
     >
       <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
         <Meta label="Risk score" value={fmtNum(f.risk_score, 1)} />
-        <Meta label="Confidence" value={fmtNum(f.confidence)} />
+        <Meta label="Confidence" value={f.conf_band ? `${f.conf_band} · ${Math.round(Number(f.conf_score) * 100)}%` : `rule ${fmtNum(f.confidence)}`} />
         <Meta label="MITRE" value={[f.mitre_tactic_id, f.mitre_technique_id].filter(Boolean).join(" · ") || "–"} />
         <Meta label="AI FP probability" value={f.ai_fp_probability === null || f.ai_fp_probability === undefined ? "not scored" : `${Math.round(Number(f.ai_fp_probability) * 100)}%`} />
       </div>
@@ -194,9 +215,27 @@ function CaseDetail({ findingId, onClose }: { findingId: string; onClose: () => 
         <Link className="rounded border border-border px-2 py-0.5 hover:bg-muted" href={`/detections?rule=${encodeURIComponent(f.rule_id)}`}>rule {f.rule_id}</Link>
       </div>
 
+      {Array.isArray(f.conf_factors) && f.conf_factors.length > 0 && (
+        <Disclosure title={<span className="flex items-center gap-2">Why this confidence <ConfidenceBadge band={f.conf_band} score={f.conf_score} /></span>} defaultOpen>
+          <ul className="space-y-1 text-sm">
+            {f.conf_factors.map((x: Row, i: number) => (
+              <li key={i} className="flex gap-2">
+                <span className={`w-12 shrink-0 text-right font-mono text-xs ${Number(x.effect) > 0 ? "text-red-600 dark:text-red-400" : Number(x.effect) < 0 ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}>
+                  {Number(x.effect) > 0 ? "+" : ""}{fmtNum(x.effect, 1)}
+                </span>
+                <span><strong>{x.factor}</strong>{x.detail ? <span className="text-muted-foreground"> — {x.detail}</span> : null}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[11px] text-muted-foreground">Effects are log-odds: positive raises the likelihood this is real, negative lowers it.</p>
+        </Disclosure>
+      )}
+
       {f.disposition && (
         <div className="flex items-start gap-2 text-sm">
           <DispositionPill value={f.disposition} />
+          {f.disposition_source && f.disposition_source !== "analyst" && <Pill>by {String(f.disposition_source).replace(/_/g, " ")}</Pill>}
+          {f.verdict_by && <span className="text-xs text-muted-foreground">({f.verdict_by})</span>}
           {f.triage_notes && <span className="text-muted-foreground">{f.triage_notes}</span>}
         </div>
       )}

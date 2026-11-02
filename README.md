@@ -21,6 +21,11 @@ UI all run inside one Snowflake account — no external infrastructure.
 - **Detection engine** — 30 MITRE ATT&CK-mapped rules (stored procedures), custom
   rules in SQL / Python / JavaScript with an AI rule generator, ML anomaly
   detection with per-user baselines
+- **Detection Autopilot** — detections that write and maintain themselves: Cortex
+  drafts rules for uncovered techniques, repairs broken rules, tunes noisy ones from
+  analyst verdicts, backtests every change against labelled attack data, and runs
+  new rules in shadow mode before promoting them. A per-change-type policy decides
+  what goes live on its own and what waits for a human (see below)
 - **Correlation** — findings grouped into incidents with kill-chain stages, entity
   graphs and attacker timelines
 - **Attack graph** — every auth/network/process event becomes a graph edge; a
@@ -102,10 +107,139 @@ Console views:
 | | Ask XDR | Ask XDR |
 | Detection engineer | Detections (library, MITRE coverage, health) | Detection Library, MITRE Coverage, Health Monitor |
 | | Rules & IOCs | Rule Editor, IOC Manager |
+| | Detection Autopilot (change feed, approvals, autonomy policy) | new |
+| | Threat Intel & Confidence (spot checks, calibration, indicators, feeds, ATT&CK/KEV/Sigma) | new |
 | | Response (playbooks, alert center, controls) | Response Automation, Alert Center |
 | CISO | Security Posture | Security Posture |
 
 Console development: see [`xdr-console/README.md`](xdr-console/README.md).
+
+## Detection Autopilot
+
+The biggest cost of running detections on a data platform is writing and maintaining
+the detection logic. The Detection Autopilot (`setup/26_autopilot.sql`) runs that
+loop itself and keeps a human in charge of how far it may go.
+
+```
+assess ──► propose ──► validate ──► decide (policy) ──► shadow ──► promote
+  │                                    │                            │
+  │  MITRE gaps, broken rules,         ├─ auto_live: apply now      └─ guardrail: auto-rollback
+  │  analyst FP verdicts, noisy /      ├─ propose_only: wait for a human    on errors or floods
+  │  silent rules                      └─ off
+```
+
+| Step | How |
+|---|---|
+| Assess | Uncovered techniques from `REFERENCE.AUTOPILOT_TECHNIQUE_BACKLOG`, rules erroring in `CUSTOM_RULE_ERRORS`, rules with repeated `false_positive` verdicts, very loud rules, rules silent for 30 days |
+| Propose | Cortex (`claude-sonnet-4-5`) writes or rewrites the rule SQL; threshold tunes are deterministic |
+| Validate | Shared SQL guard (`DASHBOARDS.RULE_SQL_VIOLATION`: one read-only SELECT on `RAW_LOGS` only), execution, then a 7-day backtest against `REFERENCE.V_ATTACK_GROUND_TRUTH` (labelled campaign events): recall, matches, benign matches, matches on analyst-FP entities |
+| Self-correct | A shadow rule that misses labelled attacks is rewritten with the missed raw events as feedback (2 revisions max, kept only if recall improves); if it still fails it is retired as `failed` and the technique is retried later |
+| Shadow | `CUSTOM_RULES.test_mode = TRUE`: the rule runs on schedule but writes to `DETECTIONS.SHADOW_FINDINGS`, never to analysts |
+| Promote | Once a shadow rule is old enough and meets the policy's recall / benign limits |
+| Guardrail | A live autopilot change that errors, or produces more than 200 findings a day, is reverted from rule history |
+| Notify | `AUTOPILOT_CHANGES` feed (console + agent), Slack webhook on promotions / rollbacks / new proposals, daily email digest |
+
+**Autonomy policy** (`DETECTIONS.AUTOPILOT_POLICY`, editable in the console, by SQL or by asking the agent):
+
+| Change type | Default mode | Notes |
+|---|---|---|
+| `new_rule` | shadow_then_promote | 24h in shadow, recall ≥ 0.5, ≤ 10 benign matches |
+| `fix_broken` | shadow_then_promote | 6h in shadow |
+| `tune_filter` | shadow_then_promote | must reduce matches on FP entities without losing recall |
+| `tune_threshold` | auto_live | deterministic, reversible |
+| `disable_noisy` | propose_only | always a human for built-in rules and severity 4-5 |
+| `retire_silent` | propose_only | |
+| `new_parser` | propose_only | reserved for the OTel ingestion phase |
+
+Hard limits that no policy can lift: the autopilot never deletes data or rules, never
+edits a pinned rule, never auto-disables a built-in or severity 4-5 rule, and every
+change is versioned in `CUSTOM_RULE_HISTORY` so rollback is one click.
+
+Human in the loop:
+
+- **Console → Detection Autopilot** — KPIs, change feed, and for each change the
+  rationale, backtest, self-correction log, before/after SQL and shadow findings, with
+  Approve / Reject / Roll back / Pin. Decisions record the signed-in user.
+- **Ask XDR** — "What did the Detection Autopilot change this week?", "Approve the T1005
+  rule", "Require approval for new rules", "Run the autopilot now".
+- **SQL** — `CALL DETECTIONS.AUTOPILOT_CYCLE()`, `AUTOPILOT_DECIDE(change_id, 'approve'|'reject'|'rollback', note)`,
+  `AUTOPILOT_SET_POLICY(change_type, mode)`, `AUTOPILOT_STATUS(days)`, `AUTOPILOT_DIGEST()`.
+
+Scheduling: `TASK_AUTOPILOT` (every 6 hours) and `TASK_AUTOPILOT_DIGEST` (07:00 UTC) are
+created suspended; resume them to let the autopilot run unattended. The digest goes to
+`AUTOPILOT_SETTINGS.digest_email`, or to the email of the user running it.
+`setup/27_autopilot_demo.sql` resets the autopilot and runs two real cycles so the
+console opens with a genuine change history (the runner does this automatically).
+
+Background for the next phase: [`docs/otel_ingestion_plan.md`](docs/otel_ingestion_plan.md)
+describes out-of-the-box ingestion through an OpenTelemetry (OTLP) receiver, with new
+sources mapped into CIM by the same autopilot and policy (`new_parser`).
+
+## Threat intel that stays current, and false positives without blind spots
+
+`setup/28_threat_intel.sql` and `setup/29_confidence.sql`; console: **Detection Engineer →
+Threat Intel & Confidence**, plus confidence badges in Triage.
+
+**Feeds** (`REFERENCE.SYNC_THREAT_INTEL`, daily task `TASK_SYNC_THREAT_INTEL`, External Access
+Integration `XDR_INTEL_EAI`):
+
+| Feed | What it gives the XDR |
+|---|---|
+| abuse.ch Feodo Tracker | live botnet C2 IPs (ThreatFox and URLhaus too once `REFERENCE.ABUSE_CH_AUTH_KEY` holds a free abuse.ch key) |
+| MISP warninglists | ~120k known-benign entries (public DNS, cloud/CDN ranges, top sites, known TI false positives) |
+| MITRE ATT&CK (STIX) | full Enterprise catalog in `REFERENCE.ATTACK_CATALOG`, new / changed techniques flagged |
+| CISA KEV | `REFERENCE.KEV_CATALOG`, new exploited vulnerabilities in the digest |
+| SigmaHQ core | 1,377 community rules in `REFERENCE.SIGMA_RULES`, mapped to our log tables |
+
+Sigma techniques we have telemetry for but no rule join the autopilot backlog, and the
+autopilot's authoring prompt gets the Sigma logic as a reference to translate, including its
+known false positives. Every resulting rule still goes through backtest → shadow → promote.
+
+**Indicator confidence** (`REFERENCE.SCORE_IOCS`): feed confidence × source reliability × age
+decay (half-life 14 days for IPs, 45 for domains, 7 for URLs, a year for hashes) + corroboration
+across sources + analyst feedback on the findings it produced. Indicators on a hard warninglist
+(for example 8.8.8.8 from an OSINT paste), expired, or below 25 do not alert; shared cloud space
+only lowers confidence, because attackers host C2 there too. Analysts can pin, revoke, restore
+or allowlist any indicator.
+
+**Finding confidence** (`DETECTIONS.SCORE_CONFIDENCE`): every finding gets `conf_score` (0-1),
+`conf_band` (high ≥ 0.7, low < 0.35) and `conf_factors`, a log-odds explanation:
+
+| Factor | Source |
+|---|---|
+| rule precision | Beta posterior over human verdicts; prior from the autopilot backtest or the rule's stated confidence, shrunk toward 50% |
+| entity history | human verdicts for this rule on this entity |
+| corroborated | other rules firing on the same entity within 24h |
+| incident | finding is part of a correlated incident |
+| IOC confidence | effective confidence of the matched indicator |
+| AI second opinion | AI_CLASSIFY false-positive probability |
+
+Triage sorts by severity × confidence and can filter by band.
+
+**Human in the loop, and why automation cannot hide attacks:**
+
+- *Verdict provenance.* `disposition_source` records who decided (analyst, review, fp_model,
+  suppression, control, confidence_model). Only human verdicts train the FP model, so
+  suppression can no longer teach itself to suppress more (the previous behaviour).
+- *Auto-suppression is narrow.* Only low-confidence findings with a learned human FP pattern
+  and no corroboration (policy `auto_suppress`).
+- *Safety net.* A machine-dismissed finding that another detection corroborates, or that turns
+  high confidence, is re-opened automatically.
+- *Spot checks.* `SAMPLE_REVIEWS` queues at least one finding per suppression pattern per week
+  plus a 10% sample. A "real attack" verdict revokes the suppression, re-opens everything it
+  hid, retrains the model and logs a `revoke_suppression` change.
+- *Proposals, not silent changes.* The autopilot proposes `suppress_entity` (expiring, 30 days),
+  `intel_allowlist`, and `recheck_verdicts` when analysts dismissed findings that other
+  detections now contradict. Re-checks always need a human, and a rule whose findings are
+  corroborated is never proposed for disabling.
+- *Measured.* `V_CONFIDENCE_CALIBRATION` (how often each band was confirmed) and
+  `V_SUPPRESSION_QUALITY` (miss rate and estimated hidden true positives per dismissal path).
+
+Demo story (reset by `setup/27_autopilot_demo.sql`): analysts have dismissed DET-021 on both a
+scheduled vulnerability scanner and the real C2 beacon from 10.1.1.10. The confidence model
+keeps the scanner suppressed (uncorroborated, spot-checked) but re-opens the machine-suppressed
+C2 findings because DET-016 beaconing corroborates them, and the autopilot asks a human to
+re-check the 13 earlier verdicts. Ask XDR: "Is automation hiding any real attacks?"
 
 ## Splunk DB Connect Integration
 
@@ -250,7 +384,10 @@ snowflake-xdr/
 │   ├── 11, 11b, 12, 13         # custom rules, response channels, API UDF, playbooks
 │   ├── 14, 15                  # platform ops, semantic view, Cortex Search, ML, posture
 │   ├── 16 … 21                 # attack graph, campaign data, controls, FP model, live feed, Cortex Agent
-│   └── 22, 23                  # demo seed state, demo clock + dedupe
+│   ├── 22, 23                  # demo seed state, demo clock + dedupe
+│   ├── 24, 25                  # agent action tools, ready-made custom rules
+│   ├── 26, 27                  # Detection Autopilot, autopilot demo state
+│   └── 28, 29                  # threat intel feeds, calibrated confidence + FP control
 ├── data/ctf/                   # compressed CTF CSVs
 ├── xdr-console/                # XDR Console (Snowflake App Runtime, Next.js)
 ├── streamlit/                  # deprecated XDR_SOC Streamlit app

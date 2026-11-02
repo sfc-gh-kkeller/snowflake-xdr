@@ -5,7 +5,7 @@
  */
 
 import {
-  rows, one, scalar, str, int, oneOf, listOf, id, ids, placeholders,
+  rows, one, scalar, str, int, oneOf, listOf, id, ids, placeholders, parseVariant,
   InputError, type Binds,
 } from "@/lib/xdr"
 
@@ -17,6 +17,14 @@ export const DISPOSITIONS = ["true_positive", "false_positive", "benign", "mitig
 export const BULK_ACTIONS = ["confirm_true_positive", "dismiss_false_positive"] as const
 
 const SEVERITIES = ["1", "2", "3", "4", "5"] as const
+const BANDS = ["high", "medium", "low"] as const
+const ACTOR_RE = /^[A-Za-z0-9_.@$-]{1,255}$/
+
+/** Signed-in console user, injected by the API route from the ingress header. */
+export function actor(p: Record<string, unknown>): string {
+  const a = typeof p.__actor === "string" ? p.__actor.trim() : ""
+  return ACTOR_RE.test(a) ? a : ""
+}
 
 /** Build the WHERE clause + binds for the finding list from validated filters. */
 export function buildTriageFilter(p: Record<string, unknown>): { where: string; binds: Binds } {
@@ -43,6 +51,11 @@ export function buildTriageFilter(p: Record<string, unknown>): { where: string; 
     clauses.push("f.detection_source = ?")
     binds.push(source)
   }
+  const bands = listOf(p, "bands", BANDS)
+  if (bands.length) {
+    clauses.push(`f.conf_band IN (${placeholders(bands.length)})`)
+    binds.push(...bands)
+  }
   const search = str(p, "search", { max: 200 }).toLowerCase()
   if (search) {
     clauses.push("(LOWER(COALESCE(f.user_name, f.src, f.dest, '')) LIKE ? OR LOWER(f.description) LIKE ?)")
@@ -63,14 +76,15 @@ export const triage = {
              f.ai_fp_probability, f.assigned_to, f.disposition, f.incident_id,
              LEFT(f.triage_notes, 160) AS triage_notes,
              IFF(f.disposition = 'mitigated_by_control', TRUE, FALSE) AS control_covered,
-             ROUND(fp.fp_rate * 100) AS fp_rate_pct
+             ROUND(fp.fp_rate * 100) AS fp_rate_pct,
+             f.conf_score, f.conf_band, f.disposition_source
       FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f
       -- FP_PATTERNS holds one row per (rule_id, entity), so this join cannot fan out
       LEFT JOIN SNOWFLAKE_XDR.DETECTIONS.FP_PATTERNS fp
         ON fp.rule_id = f.rule_id
        AND fp.entity = COALESCE(f.user_name, f.src, f.dest, 'unknown')
       ${where}
-      ORDER BY f.severity DESC, f.risk_score DESC, f.detection_time DESC
+      ORDER BY f.severity * COALESCE(f.conf_score, 0.5) DESC, f.severity DESC, f.risk_score DESC, f.detection_time DESC
       LIMIT 200`, binds)
   },
 
@@ -82,12 +96,13 @@ export const triage = {
              f.status, f.detection_source, f.user_name, f.src, f.dest,
              COALESCE(f.user_name, f.src, f.dest) AS entity,
              f.description, f.evidence, f.ai_explanation, f.ai_fp_probability,
-             f.assigned_to, f.disposition, f.triage_notes, f.incident_id
+             f.assigned_to, f.disposition, f.triage_notes, f.incident_id,
+             f.conf_score, f.conf_band, f.conf_factors, f.disposition_source, f.verdict_by
       FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f
       LEFT JOIN SNOWFLAKE_XDR.DETECTIONS.DETECTION_RULES r ON r.rule_id = f.rule_id
       WHERE f.finding_id = ?`, [fid])
     if (!finding) throw new InputError("Finding not found")
-    return finding
+    return { ...finding, conf_factors: parseVariant(finding.conf_factors) }
   },
 
   /** Cortex AI semantic similarity: is this part of a bigger campaign? */
@@ -109,9 +124,11 @@ export const triage = {
       SET status = ?,
           assigned_to = NULLIF(?, ''),
           disposition = COALESCE(NULLIF(?, ''), disposition),
+          disposition_source = IFF(NULLIF(?, '') IS NULL, disposition_source, 'analyst'),
+          verdict_by = IFF(NULLIF(?, '') IS NULL, verdict_by, NULLIF(?, '')),
           triage_notes = NULLIF(?, ''),
           triaged_at = CURRENT_TIMESTAMP()
-      WHERE finding_id = ?`, [status, assignee, disposition, notes, fid])
+      WHERE finding_id = ?`, [status, assignee, disposition, disposition, disposition, actor(p), notes, fid])
     return { message: `Case updated: ${status}` }
   },
 
@@ -123,8 +140,9 @@ export const triage = {
       : ["investigating", "true_positive"]
     await rows(`
       UPDATE SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS
-      SET status = ?, disposition = ?, triaged_at = CURRENT_TIMESTAMP()
-      WHERE finding_id IN (${placeholders(targets.length)})`, [status, disposition, ...targets])
+      SET status = ?, disposition = ?, disposition_source = 'analyst', verdict_by = NULLIF(?, ''),
+          triaged_at = CURRENT_TIMESTAMP()
+      WHERE finding_id IN (${placeholders(targets.length)})`, [status, disposition, actor(p), ...targets])
     return { message: `${action.replace(/_/g, " ")} applied to ${targets.length} finding(s)` }
   },
 

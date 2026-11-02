@@ -109,7 +109,7 @@ BEGIN
 
     v_sample := SUBSTR(:entity_json:events::VARCHAR, 1, 8000);
 
-    SELECT SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b',
+    SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-sonnet-4-5',
         'You are a SOC investigator. Analyze this entity activity timeline and provide a security assessment.
 ENTITY: ' || :P_ENTITY || '
 EVENTS (' || :v_ev_count || ' total, sample below):

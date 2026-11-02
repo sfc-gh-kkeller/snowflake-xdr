@@ -296,7 +296,7 @@ BEGIN
         v_paths := TO_JSON(rec);
     END FOR;
 
-    SELECT SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b',
+    SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-sonnet-4-5',
         'You are a senior SOC incident narrator. Write the attacker story for this security incident.
 Explain how the events connect as a campaign: initial access, what the attacker tried, how they moved, and what the kill-chain stage means.
 

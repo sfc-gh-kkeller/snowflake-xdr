@@ -93,18 +93,26 @@ export interface ChatMessage { role: "user" | "assistant"; text: string }
 
 const AGENT = "SNOWFLAKE_XDR.DASHBOARDS.XDR_ANALYST"
 
-/** Pull the user-facing text parts out of a DATA_AGENT_RUN response. */
+/**
+ * Pull the user-facing text parts out of a DATA_AGENT_RUN response. Text emitted
+ * before the last tool call is the agent's interim planning, so only the text
+ * after it is the answer (unless the agent produced no text after tools).
+ */
 export function extractAgentText(resp: unknown): { text: string; tools: string[] } {
   const r = (typeof resp === "string" ? safeJson(resp) : resp) as Record<string, unknown> | null
   const content = Array.isArray(r?.content) ? (r?.content as Record<string, unknown>[]) : []
-  const texts: string[] = []
+  let texts: string[] = []
   const tools: string[] = []
   for (const part of content) {
     if (part?.type === "text" && typeof part.text === "string") texts.push(part.text)
-    if (part?.type === "tool_use") {
+    if (part?.type === "tool_use" || part?.type === "tool_result") {
       const tu = part.tool_use as Record<string, unknown> | undefined
       if (tu && typeof tu.name === "string") tools.push(tu.name)
+      if (texts.length) texts = []
     }
+  }
+  if (!texts.length) {
+    for (const part of content) if (part?.type === "text" && typeof part.text === "string") texts.push(part.text)
   }
   return { text: texts.join("\n\n").trim(), tools: [...new Set(tools)] }
 }

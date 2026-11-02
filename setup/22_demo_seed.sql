@@ -60,6 +60,8 @@ BEGIN
     -- so SCORE_FINDINGS_FP has something to auto-suppress in the demo.
     UPDATE SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f
     SET f.disposition = 'false_positive',
+        f.disposition_source = 'analyst',
+        f.verdict_by = 'demo_analyst',
         f.status = 'dismissed',
         f.triage_notes = 'Analyst: vulnerability scanner scheduled scan',
         f.triaged_at = CURRENT_TIMESTAMP()
@@ -78,6 +80,8 @@ BEGIN
     -- ML-ANOMALY-001 volume spikes on admin accounts: authorized admin work
     UPDATE SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f
     SET f.disposition = 'benign',
+        f.disposition_source = 'analyst',
+        f.verdict_by = 'demo_analyst',
         f.status = 'resolved',
         f.triage_notes = 'Analyst: authorized admin activity',
         f.triaged_at = CURRENT_TIMESTAMP()

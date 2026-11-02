@@ -8,6 +8,8 @@ import { triage } from "@/lib/handlers/triage"
 import { investigations, entityHandlers, graph } from "@/lib/handlers/investigate"
 import { live, hunt, ask } from "@/lib/handlers/operate"
 import { detections, rules, response, posture } from "@/lib/handlers/engineer"
+import { autopilot } from "@/lib/handlers/autopilot"
+import { intel } from "@/lib/handlers/intel"
 
 export type Handler = (params: Record<string, unknown>) => Promise<unknown>
 
@@ -24,6 +26,8 @@ export const handlers: Record<string, Handler> = {
   ...rules,
   ...response,
   ...posture,
+  ...autopilot,
+  ...intel,
 }
 
 export function getHandler(name: string): Handler | null {

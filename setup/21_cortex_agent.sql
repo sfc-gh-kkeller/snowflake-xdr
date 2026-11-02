@@ -36,7 +36,10 @@ instructions:
     - Never say you cannot create, enable, change, or run something if one of
       your tools does it. Your action tools are: create_detection_rule,
       set_rule_enabled, add_ioc, update_finding, set_incident_status,
-      create_playbook, run_detections. Things you genuinely cannot do: edit raw
+      create_playbook, run_detections, and for the Detection Autopilot:
+      autopilot_status, decide_autopilot_change, set_autopilot_policy,
+      run_autopilot_cycle, and for threat intel and false positives:
+      threat_intel_status, confidence_status, decide_spot_check. Things you genuinely cannot do: edit raw
       telemetry, delete rules or data, change user access, or deploy new data
       sources (say that plainly and give the next step instead).
     - After an action, report exactly what changed using the tool output: IDs,
@@ -69,11 +72,33 @@ instructions:
     - Before update_finding or set_incident_status, look up the exact ID with
       analyst_text_to_sql if the user did not give one. Never guess IDs.
     - After creating or enabling rules, offer to run_detections so findings appear now.
+
+    Detection Autopilot (self-maintaining detections with a human in the loop):
+    - "What did the autopilot change / what is pending / what is in shadow" -> autopilot_status.
+      Summarise by status, name the changes, and give the gate or evaluation reason.
+    - Approve, reject or roll back a change -> decide_autopilot_change with the exact change_id
+      from autopilot_status (never guess IDs). Pin/unpin takes a rule_id instead.
+    - "Let the autopilot do X automatically" / "require approval for X" -> set_autopilot_policy
+      with change_type in new_rule, fix_broken, tune_filter, tune_threshold, disable_noisy,
+      retire_silent, new_parser and mode in auto_live, shadow_then_promote, propose_only, off.
+    - "Run the autopilot now" -> run_autopilot_cycle (takes 1-3 minutes).
+
+    Threat intel and false-positive control:
+    - Every finding has a calibrated confidence (conf_score 0-1, conf_band high/medium/low, conf_factors)
+      built from the rule's measured precision, entity history, corroboration by other rules, incident
+      membership, IOC confidence and the AI second opinion. When asked "is this real" or "why is this
+      high/low", explain the conf_factors. Prefer confidence over raw severity when prioritising.
+    - "What's new in threat intel / feeds / new KEVs / new ATT&CK techniques" -> threat_intel_status.
+    - "What did automation suppress / spot checks / is the FP model hiding anything" -> confidence_status;
+      report suppression quality (miss rate) and open spot checks with their review_id.
+    - Recording a spot-check verdict -> decide_spot_check with the exact review_id. A true_positive
+      verdict revokes the suppression and re-opens what it hid; say so.
   sample_questions:
     - question: "Which MITRE tactics have no detection coverage?"
     - question: "Create and enable a rule for external port scanning"
     - question: "Trace the attack path from 10.1.5.107"
-    - question: "Add 185.220.101.4 as a C2 IOC"
+    - question: "What did the Detection Autopilot change this week?"
+    - question: "Is automation hiding any real attacks?"
 
 tools:
   - tool_spec:
@@ -276,6 +301,93 @@ tools:
         type: object
         properties: {}
   - tool_spec:
+      type: "generic"
+      name: "autopilot_status"
+      description: "Detection Autopilot status: change counts by status, recent and open changes (change_id, status, change_type, title, rationale, gate/evaluation reason), and the policy mode per change type."
+      input_schema:
+        type: object
+        properties:
+          p_days:
+            type: number
+            description: "Look-back in days for recent changes (default 7)"
+        required: [p_days]
+  - tool_spec:
+      type: "generic"
+      name: "decide_autopilot_change"
+      description: "ACTION. Human decision on a Detection Autopilot change: approve (apply a proposed or shadow change now), reject (discard; not re-proposed for 30 days), rollback (revert an applied/promoted/approved change), pin/unpin (stop the autopilot from editing a rule; pass the rule_id as p_change_id)."
+      input_schema:
+        type: object
+        properties:
+          p_change_id:
+            type: string
+            description: "change_id from autopilot_status (or rule_id for pin/unpin)"
+          p_action:
+            type: string
+            description: "approve, reject, rollback, pin or unpin"
+          p_note:
+            type: string
+            description: "Short reason recorded in the audit trail"
+        required: [p_change_id, p_action, p_note]
+  - tool_spec:
+      type: "generic"
+      name: "set_autopilot_policy"
+      description: "ACTION. Set how autonomous the Detection Autopilot is for one change type."
+      input_schema:
+        type: object
+        properties:
+          p_change_type:
+            type: string
+            description: "new_rule, fix_broken, tune_filter, tune_threshold, disable_noisy, retire_silent or new_parser"
+          p_mode:
+            type: string
+            description: "auto_live (apply immediately), shadow_then_promote (run silently, go live after passing tests), propose_only (wait for a human), off"
+        required: [p_change_type, p_mode]
+  - tool_spec:
+      type: "generic"
+      name: "run_autopilot_cycle"
+      description: "ACTION. Run one Detection Autopilot cycle now: guardrail rollbacks, promotion of shadow rules, new rules for uncovered techniques, fixes for broken rules, tuning from analyst false-positive verdicts."
+      input_schema:
+        type: object
+        properties: {}
+  - tool_spec:
+      type: "generic"
+      name: "threat_intel_status"
+      description: "Threat intel status: feed health, IOC counts (active, high confidence, neutralised by warninglists, expired), new CISA KEVs, new ATT&CK techniques, Sigma coverage, autopilot backlog by origin."
+      input_schema:
+        type: object
+        properties:
+          p_days:
+            type: number
+            description: "Look-back in days for 'new' items (default 7)"
+        required: [p_days]
+  - tool_spec:
+      type: "generic"
+      name: "confidence_status"
+      description: "False-positive control status: open findings by confidence band, auto-suppressed count, open spot checks (review_id, rule, entity, what dismissed it), suppression quality per path (dismissed, reviewed, real attacks found, miss rate) and calibration per band."
+      input_schema:
+        type: object
+        properties: {}
+  - tool_spec:
+      type: "generic"
+      name: "decide_spot_check"
+      description: "ACTION. Record a human verdict on a spot check of an automatically dismissed finding. true_positive revokes the suppression, re-opens every finding it hid and retrains the FP model; false_positive or benign confirms the suppression."
+      input_schema:
+        type: object
+        properties:
+          p_review_id:
+            type: string
+            description: "review_id from confidence_status"
+          p_verdict:
+            type: string
+            description: "true_positive, false_positive or benign"
+          p_note:
+            type: string
+            description: "Short reason for the audit trail"
+          p_actor:
+            type: string
+            description: "Leave empty"
+        required: [p_review_id, p_verdict, p_note, p_actor]
+  - tool_spec:
       type: "data_to_chart"
       name: "data_to_chart"
       description: "Generates visualizations from tool data"
@@ -329,4 +441,32 @@ tool_resources:
     type: procedure
     identifier: "SNOWFLAKE_XDR.DASHBOARDS.AGENT_RUN_DETECTIONS"
     execution_environment: {type: warehouse, warehouse: XDR_WH, query_timeout: 300}
+  autopilot_status:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DETECTIONS.AUTOPILOT_STATUS"
+    execution_environment: {type: warehouse, warehouse: XDR_WH}
+  decide_autopilot_change:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DETECTIONS.AUTOPILOT_DECIDE"
+    execution_environment: {type: warehouse, warehouse: XDR_WH, query_timeout: 180}
+  set_autopilot_policy:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DETECTIONS.AUTOPILOT_SET_POLICY"
+    execution_environment: {type: warehouse, warehouse: XDR_WH}
+  threat_intel_status:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.REFERENCE.INTEL_STATUS"
+    execution_environment: {type: warehouse, warehouse: XDR_WH}
+  confidence_status:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DETECTIONS.CONFIDENCE_STATUS"
+    execution_environment: {type: warehouse, warehouse: XDR_WH}
+  decide_spot_check:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DETECTIONS.REVIEW_DECIDE"
+    execution_environment: {type: warehouse, warehouse: XDR_WH, query_timeout: 180}
+  run_autopilot_cycle:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DETECTIONS.AUTOPILOT_CYCLE"
+    execution_environment: {type: warehouse, warehouse: XDR_WH, query_timeout: 600}
 $$;

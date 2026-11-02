@@ -27,6 +27,8 @@ export const NAV: NavGroup[] = [
     items: [
       { href: "/detections", label: "Detections", icon: "ShieldCheck" },
       { href: "/rules", label: "Rules & IOCs", icon: "FileCode2" },
+      { href: "/autopilot", label: "Detection Autopilot", icon: "Bot" },
+      { href: "/intel", label: "Threat Intel & Confidence", icon: "Radar" },
       { href: "/response", label: "Response", icon: "Zap" },
     ],
   },

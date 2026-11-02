@@ -204,7 +204,7 @@ sql_file "$CHANNELS_SQL"
 
 for f in 12_api_udf 13_response_playbooks 14_platform_ops 15_platform_pro \
          16_attack_graph 18_controls 19_fp_suppression 20_live_feed \
-         24_agent_actions 21_cortex_agent 22_demo_seed 23_time_shift; do
+         24_agent_actions 26_autopilot 28_threat_intel 29_confidence 21_cortex_agent 22_demo_seed 23_time_shift; do
     sql_file "setup/$f.sql"
 done
 
@@ -240,6 +240,8 @@ sql_call "SHIFT_DEMO_TIME" "CALL SNOWFLAKE_XDR.REFERENCE.SHIFT_DEMO_TIME()"
 # 5. pipeline
 # ---------------------------------------------------------------------------
 phase "5/8 Detection, correlation and AI pipeline"
+# Live threat intel first (IOC confidence decides what DET-021 matches); feed errors are recorded, not fatal
+sql_call "SYNC_THREAT_INTEL"         "CALL SNOWFLAKE_XDR.REFERENCE.SYNC_THREAT_INTEL('all')"
 sql_call "RUN_ALL_DETECTIONS"        "CALL SNOWFLAKE_XDR.DETECTIONS.RUN_ALL_DETECTIONS()"
 # The built-in rules look back 15-60 minutes, so freshly generated telemetry
 # needs a replay over its historical hot hours (findings keep their true times)
@@ -251,18 +253,23 @@ sql_call "RUN_ML_ANOMALY_DETECTION"  "CALL SNOWFLAKE_XDR.DETECTIONS.RUN_ML_ANOMA
 sql_call "BUILD_ATTACK_GRAPH"        "CALL SNOWFLAKE_XDR.DETECTIONS.BUILD_ATTACK_GRAPH()"
 sql_call "DOOR_RATTLING_SCAN"        "CALL SNOWFLAKE_XDR.DETECTIONS.DOOR_RATTLING_SCAN()"
 sql_call "DETECT_PROTECTED_ACCESS"   "CALL SNOWFLAKE_XDR.DETECTIONS.DETECT_PROTECTED_ACCESS()"
+# Ready-made custom rules (SQL + Python + one disabled draft), run once over the data
+sql_file "setup/25_demo_custom_rules.sql"
 # Built-in rules re-flag their lookback window on every manual run
 sql_call "DEDUPE_FINDINGS"           "CALL SNOWFLAKE_XDR.DETECTIONS.DEDUPE_FINDINGS()"
 sql_call "APPLY_CONTROL_ASSESSMENT"  "CALL SNOWFLAKE_XDR.DETECTIONS.APPLY_CONTROL_ASSESSMENT()"
 sql_call "CORRELATE_INCIDENTS"       "CALL SNOWFLAKE_XDR.INCIDENTS.CORRELATE_INCIDENTS()"
 sql_call "SEED_ANALYST_DISPOSITIONS" "CALL SNOWFLAKE_XDR.REFERENCE.SEED_ANALYST_DISPOSITIONS()"
 sql_call "TRAIN_FP_MODEL"            "CALL SNOWFLAKE_XDR.DETECTIONS.TRAIN_FP_MODEL()"
-sql_call "SCORE_FINDINGS_FP"         "CALL SNOWFLAKE_XDR.DETECTIONS.SCORE_FINDINGS_FP()"
+# Calibrated confidence, suppression and spot-check sampling (29_confidence.sql)
+sql_call "RUN_CONFIDENCE_PIPELINE"   "CALL SNOWFLAKE_XDR.DETECTIONS.RUN_CONFIDENCE_PIPELINE()"
 if [[ $SKIP_AI -eq 1 ]]; then
     log "--skip-ai: AI triage and classification skipped"
 else
     sql_call "AI_TRIAGE_AGENT"       "CALL SNOWFLAKE_XDR.DETECTIONS.AI_TRIAGE_AGENT(10)"
     sql_call "AI_CLASSIFY_FINDINGS"  "CALL SNOWFLAKE_XDR.DETECTIONS.AI_CLASSIFY_FINDINGS(20)"
+    # Detection Autopilot: two real cycles so the console opens with a change history
+    sql_file "setup/27_autopilot_demo.sql"
 fi
 sql_call "EMIT_LIVE_EVENTS"          "CALL SNOWFLAKE_XDR.RAW_LOGS.EMIT_LIVE_EVENTS(3)"
 if [[ $NOTIFY -eq 1 ]]; then

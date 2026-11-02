@@ -41,13 +41,14 @@ describe("triage filter", () => {
     expect(r).toEqual({ message: "dismiss false positive applied to 2 finding(s)" })
     const [sql, opts] = vi.mocked(querySnowflake).mock.calls[0]
     expect(sql).toContain("WHERE finding_id IN (?, ?)")
-    expect(opts).toEqual({ binds: ["dismissed", "false_positive", "a1", "b2"] })
+    expect(opts).toEqual({ binds: ["dismissed", "false_positive", "", "a1", "b2"] })
   })
 
   it("case update binds in column order", async () => {
     vi.mocked(querySnowflake).mockResolvedValueOnce([])
     await triage["triage.update"]({ finding_id: "f1", status: "resolved", assigned_to: "kevin", disposition: "benign", triage_notes: "ok" })
-    expect(vi.mocked(querySnowflake).mock.calls[0][1]).toEqual({ binds: ["resolved", "kevin", "benign", "ok", "f1"] })
+    // disposition is bound three times: value, provenance switch, verdict_by switch; then the console user
+    expect(vi.mocked(querySnowflake).mock.calls[0][1]).toEqual({ binds: ["resolved", "kevin", "benign", "benign", "benign", "", "ok", "f1"] })
   })
 })
 

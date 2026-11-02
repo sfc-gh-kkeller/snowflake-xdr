@@ -33,6 +33,9 @@ export async function POST(request: Request, ctx: { params: Promise<{ name: stri
   } catch {
     return Response.json({ error: "Body must be valid JSON" }, { status: 400 })
   }
+  // Signed-in Snowflake user, set by the SPCS ingress; used for audit trails.
+  // Always overwrite so a client cannot supply its own value.
+  params.__actor = request.headers.get("sf-context-current-user") ?? ""
 
   const started = Date.now()
   try {

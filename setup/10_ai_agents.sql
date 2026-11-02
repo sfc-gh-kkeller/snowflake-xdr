@@ -64,7 +64,7 @@ BEGIN
     LIMIT 10;
 
     -- Call Cortex LLM
-    SELECT SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b',
+    SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-sonnet-4-5',
         'You are a senior SOC analyst performing threat detection. Analyze these security logs and identify suspicious patterns that automated rules may have missed.
 
 CONTEXT:
@@ -296,7 +296,7 @@ BEGIN
     );
 
     -- Call the hunting LLM
-    SELECT SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b',
+    SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-sonnet-4-5',
         'You are an elite threat hunter performing proactive security analysis. You have deep knowledge of MITRE ATT&CK, OWASP Top 10, and real-world APT tradecraft.
 
 HUNTING FOCUS:

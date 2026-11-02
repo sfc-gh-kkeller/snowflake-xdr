@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES (
     updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 
+-- Detection Autopilot ownership: managed_by = human | autopilot; pinned rules are never auto-edited.
+-- test_mode = TRUE is shadow mode: the rule runs but writes to SHADOW_FINDINGS only.
+ALTER TABLE SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES ADD COLUMN IF NOT EXISTS managed_by VARCHAR(20) DEFAULT 'human';
+ALTER TABLE SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES ADD COLUMN IF NOT EXISTS pinned BOOLEAN DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.DETECTIONS.SHADOW_FINDINGS
+    LIKE SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS;
+
 CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULE_ERRORS (
     rule_id VARCHAR,
     error_time TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
@@ -67,11 +75,14 @@ DECLARE
     v_window NUMBER;
     v_lookback NUMBER;
     v_sample VARCHAR;
+    v_target VARCHAR;
 BEGIN
     SELECT name, description, category, severity, mitre_tactic_id, mitre_technique_id,
-           code, threshold_count, threshold_window_minutes, lookback_minutes
+           code, threshold_count, threshold_window_minutes, lookback_minutes,
+           IFF(COALESCE(test_mode, FALSE), 'SNOWFLAKE_XDR.DETECTIONS.SHADOW_FINDINGS',
+               'SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS')
     INTO :v_name, :v_desc, :v_cat, :v_sev, :v_tactic, :v_tech,
-         :v_code, :v_thresh, :v_window, :v_lookback
+         :v_code, :v_thresh, :v_window, :v_lookback, :v_target
     FROM SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES
     WHERE rule_id = :P_RULE_ID;
 
@@ -93,7 +104,7 @@ BEGIN
         RETURN :v_sample;
     END IF;
 
-    INSERT INTO SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS
+    INSERT INTO IDENTIFIER(:v_target)
         (finding_id, rule_id, description, category, severity,
          mitre_tactic_id, mitre_technique_id, user_name, src, dest,
          event_time, detection_time, detection_source, confidence,
@@ -145,10 +156,10 @@ BEGIN
     v_short := 'R' || SUBSTR(SHA1(:P_RULE_ID), 0, 12);
 
     IF (:v_language = 'python') THEN
-        v_ddl := 'CREATE OR REPLACE FUNCTION SNOWFLAKE_XDR.DETECTIONS.CUSTOM_' || :v_short || '(row VARIANT) RETURNS NUMBER LANGUAGE PYTHON RUNTIME_VERSION = ''3.10'' HANDLER = ''detect'' AS ' || DOLLAR2 || :v_code || DOLLAR2;
+        v_ddl := 'CREATE OR REPLACE FUNCTION SNOWFLAKE_XDR.DETECTIONS.CUSTOM_' || :v_short || '(rec VARIANT) RETURNS NUMBER LANGUAGE PYTHON RUNTIME_VERSION = ''3.10'' HANDLER = ''detect'' AS ' || DOLLAR2 || :v_code || DOLLAR2;
     ELSE
         IF (:v_language = 'javascript') THEN
-            v_ddl := 'CREATE OR REPLACE FUNCTION SNOWFLAKE_XDR.DETECTIONS.CUSTOM_' || :v_short || '(row VARIANT) RETURNS NUMBER LANGUAGE JAVASCRIPT HANDLER = ''detect'' AS ' || DOLLAR2 || :v_code || DOLLAR2;
+            v_ddl := 'CREATE OR REPLACE FUNCTION SNOWFLAKE_XDR.DETECTIONS.CUSTOM_' || :v_short || '(rec VARIANT) RETURNS NUMBER LANGUAGE JAVASCRIPT HANDLER = ''detect'' AS ' || DOLLAR2 || :v_code || DOLLAR2;
         ELSE
             RETURN 'OK: sql rule needs no compilation';
         END IF;
@@ -177,15 +188,19 @@ DECLARE
     v_short VARCHAR;
     v_stage VARCHAR;
     v_sample VARCHAR;
+    v_target VARCHAR;
 BEGIN
-    SELECT language, source_table, lookback_minutes
-    INTO :v_language, :v_source, :v_lookback
+    SELECT language, source_table, lookback_minutes,
+           IFF(COALESCE(test_mode, FALSE), 'SNOWFLAKE_XDR.DETECTIONS.SHADOW_FINDINGS',
+               'SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS')
+    INTO :v_language, :v_source, :v_lookback, :v_target
     FROM SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES
     WHERE rule_id = :P_RULE_ID;
 
     v_short := 'CUSTOM_R' || SUBSTR(SHA1(:P_RULE_ID), 0, 12);
 
-    LET stage_sql VARCHAR := 'CREATE OR REPLACE TEMPORARY TABLE XDR_CUSTOM_RULE_MATCHES AS SELECT l.* FROM SNOWFLAKE_XDR.RAW_LOGS.' || :v_source || ' l WHERE l._time > DATEADD(''minute'', ' || (-1 * :v_lookback) || ', CURRENT_TIMESTAMP()) AND SNOWFLAKE_XDR.DETECTIONS.' || :v_short || '(TO_VARIANT(l)) = 1';
+    -- OBJECT_CONSTRUCT(*) is only allowed in a SELECT list, so build the row object in a subquery
+    LET stage_sql VARCHAR := 'CREATE OR REPLACE TEMPORARY TABLE XDR_CUSTOM_RULE_MATCHES AS SELECT * EXCLUDE (XDR_ROW) FROM (SELECT t.*, OBJECT_CONSTRUCT(*) AS XDR_ROW FROM SNOWFLAKE_XDR.RAW_LOGS.' || :v_source || ' t WHERE t._time > DATEADD(''minute'', ' || (-1 * :v_lookback) || ', CURRENT_TIMESTAMP())) WHERE SNOWFLAKE_XDR.DETECTIONS.' || :v_short || '(XDR_ROW) = 1';
     EXECUTE IMMEDIATE (:stage_sql);
 
     IF (:P_DRY_RUN) THEN
@@ -197,7 +212,7 @@ BEGIN
         RETURN :v_sample;
     END IF;
 
-    INSERT INTO SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS
+    INSERT INTO IDENTIFIER(:v_target)
         (finding_id, rule_id, description, category, severity,
          mitre_tactic_id, mitre_technique_id, user_name, src, dest,
          event_time, detection_time, detection_source, confidence,
@@ -209,7 +224,7 @@ BEGIN
         cr.category, cr.severity, cr.mitre_tactic_id, cr.mitre_technique_id,
         l.user_name, l.src, l.dest,
         l._time, CURRENT_TIMESTAMP(), 'custom_rule', 70,
-        TO_VARIANT(l), cr.severity * 20, 'new'
+        OBJECT_CONSTRUCT(l.*), cr.severity * 20, 'new'
     FROM XDR_CUSTOM_RULE_MATCHES l,
          SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES cr
     WHERE cr.rule_id = :P_RULE_ID;
@@ -235,7 +250,7 @@ DECLARE
     err_msg VARCHAR;
     rules CURSOR FOR
         SELECT rule_id, language FROM SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES
-        WHERE enabled = TRUE;
+        WHERE enabled = TRUE OR COALESCE(test_mode, FALSE) = TRUE;
 BEGIN
     FOR rec IN rules DO
         cur_rule_id := rec.rule_id;
@@ -253,9 +268,10 @@ BEGIN
                 CALL SNOWFLAKE_XDR.DETECTIONS.RUN_CUSTOM_RULE_CODE(:cur_rule_id, FALSE)
                     INTO :run_status;
             END IF;
+            -- status looks like 'OK: <n> findings inserted'
             IF (STARTSWITH(:run_status, 'OK')) THEN
                 total_findings := :total_findings
-                    + CAST(SPLIT_PART(:run_status, ': ', 2) AS NUMBER);
+                    + COALESCE(TRY_CAST(SPLIT_PART(SPLIT_PART(:run_status, ': ', 2), ' ', 1) AS NUMBER), 0);
             END IF;
         EXCEPTION
             WHEN OTHER THEN
@@ -324,7 +340,7 @@ DECLARE
     rule_json VARIANT;
     v_id VARCHAR;
 BEGIN
-    SELECT SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b', '
+    SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-sonnet-4-5', '
 You are a detection engineer for a Snowflake-native XDR platform. Convert the user''s
 requirement into a detection rule.
 

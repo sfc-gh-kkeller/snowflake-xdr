@@ -363,8 +363,9 @@ BEGIN
     INTO :posture
     FROM SNOWFLAKE_XDR.DETECTIONS.V_POSTURE_METRICS;
 
-    SELECT SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b',
+    SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-sonnet-4-5',
         'You are the lead analyst writing the morning security briefing for the SOC team.
+Today is ' || TO_CHAR(CURRENT_DATE(), 'Mon DD, YYYY') || '. Never output placeholders such as [Current Date].
 Platform data:
 - Incidents: ' || :metrics_json || '
 - ' || :findings_summary || '
@@ -374,8 +375,8 @@ Platform data:
 Write a concise daily briefing with:
 1. HEADLINE: one sentence on the security state
 2. TOP CONCERNS: 2-3 bullets of what needs attention today
-3. WINS: 1-2 bullets of positive indicators
-Keep it under 150 words. Plain text with markdown headers.')
+3. WINS: 1-2 bullets of genuinely positive indicators (e.g. noise auto-suppressed, findings already covered by controls, detection coverage). An MTTR of 0 means no incidents have been closed yet; never present it as a win.
+Use only the numbers above; do not invent figures. Keep it under 150 words. Plain text with markdown headers.')
     INTO :ai_response;
 
     RETURN OBJECT_CONSTRUCT('briefing', :ai_response);
@@ -425,7 +426,7 @@ BEGIN
     FROM (SELECT severity, description FROM SNOWFLAKE_XDR.INCIDENTS.INCIDENTS
           ORDER BY severity DESC LIMIT 5);
 
-    SELECT SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b',
+    SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-sonnet-4-5',
         'Write an executive security report section for the CISO based on:
 PLATFORM METRICS: ' || :posture || '
 TOP INCIDENTS: ' || :incident_summary || '

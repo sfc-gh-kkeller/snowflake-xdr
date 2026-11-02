@@ -42,7 +42,9 @@ BEGIN
                COUNT(*) AS total_count,
                MAX(triaged_at) AS last_disp
         FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS
+        -- Human verdicts only: machine suppressions must not train the model that made them
         WHERE disposition IS NOT NULL
+          AND COALESCE(disposition_source, 'analyst') IN ('analyst', 'review')
         GROUP BY 1, 2
     ) f
     ON p.rule_id = f.rule_id AND p.entity = f.entity
@@ -51,8 +53,7 @@ BEGIN
         p.tp_count = f.tp_count,
         p.benign_count = f.benign_count,
         p.total_count = f.total_count,
-        p.fp_rate = IFF(f.total_count > 0,
-            (f.fp_count + 0.5 * f.benign_count) / f.total_count, 0),
+        p.fp_rate = (f.fp_count + 0.5 * f.benign_count + 0.5) / (f.total_count + 1),
         p.last_disposition = f.last_disp,
         p.trained_at = CURRENT_TIMESTAMP()
     WHEN NOT MATCHED THEN INSERT
@@ -61,9 +62,15 @@ BEGIN
     VALUES
         (f.rule_id, f.entity, f.fp_count, f.tp_count, f.benign_count,
          f.total_count,
-         IFF(f.total_count > 0,
-             (f.fp_count + 0.5 * f.benign_count) / f.total_count, 0),
+         (f.fp_count + 0.5 * f.benign_count + 0.5) / (f.total_count + 1),
          f.last_disp);
+
+    -- Patterns whose human verdicts were all withdrawn (re-opened) no longer apply
+    DELETE FROM SNOWFLAKE_XDR.DETECTIONS.FP_PATTERNS p
+    WHERE NOT EXISTS (SELECT 1 FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f
+                      WHERE f.rule_id = p.rule_id AND COALESCE(f.user_name, f.src, f.dest, 'unknown') = p.entity
+                        AND f.disposition IS NOT NULL
+                        AND COALESCE(f.disposition_source, 'analyst') IN ('analyst', 'review'));
 
     SELECT COUNT(*) INTO :v_patterns FROM SNOWFLAKE_XDR.DETECTIONS.FP_PATTERNS;
     RETURN 'FP model trained on ' || :v_patterns || ' (rule, entity) patterns.';
@@ -84,7 +91,10 @@ CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.DETECTIONS.SUPPRESSION_RULES (
 );
 
 -- ---------------------------------------------------------------------------
--- 3. Score + auto-suppress open findings
+-- 3. Score + suppress open findings
+--    Explicit, expiring suppressions first; then the calibrated confidence
+--    model (29_confidence.sql) scores every finding and auto-suppresses only
+--    low-confidence, uncorroborated findings with a learned human FP pattern.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE PROCEDURE SNOWFLAKE_XDR.DETECTIONS.SCORE_FINDINGS_FP()
 RETURNS VARCHAR
@@ -93,12 +103,14 @@ AS
 $$
 DECLARE
     v_dismissed NUMBER;
-    v_flagged NUMBER;
+    v_conf VARCHAR;
 BEGIN
     -- 3a. Explicit suppression rules (not yet expired)
     UPDATE SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f
     SET f.status = 'dismissed',
         f.disposition = 'false_positive',
+        f.disposition_source = 'suppression',
+        f.verdict_by = s.created_by,
         f.triage_notes = COALESCE(f.triage_notes || ' | ', '')
             || 'Suppressed by rule: ' || s.reason,
         f.triaged_at = CURRENT_TIMESTAMP()
@@ -110,41 +122,10 @@ BEGIN
 
     v_dismissed := SQLROWCOUNT;
 
-    -- 3b. Learned model: auto-dismiss >= 0.85 FP rate with >= 3 priors
-    UPDATE SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f
-    SET f.status = 'dismissed',
-        f.disposition = 'false_positive',
-        f.triage_notes = COALESCE(f.triage_notes || ' | ', '')
-            || 'Auto-suppressed by FP model: ' || ROUND(p.fp_rate * 100)
-            || '% FP rate over ' || p.total_count || ' prior dispositions',
-        f.triaged_at = CURRENT_TIMESTAMP()
-    FROM SNOWFLAKE_XDR.DETECTIONS.FP_PATTERNS p
-    WHERE f.status = 'new'
-      AND p.rule_id = f.rule_id
-      AND p.entity = COALESCE(f.user_name, f.src, f.dest, 'unknown')
-      AND p.fp_rate >= 0.85
-      AND p.total_count >= 3;
+    -- 3b. Calibrated confidence: score, explain, route
+    CALL SNOWFLAKE_XDR.DETECTIONS.SCORE_CONFIDENCE() INTO :v_conf;
 
-    v_dismissed := :v_dismissed + SQLROWCOUNT;
-
-    -- 3c. Learned model: flag likely-FPs (0.5 - 0.85) for the analyst
-    UPDATE SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f
-    SET f.triage_notes = COALESCE(f.triage_notes || ' | ', '')
-            || 'FP model: likely false positive ('
-            || ROUND(p.fp_rate * 100) || '% historical FP rate)'
-    FROM SNOWFLAKE_XDR.DETECTIONS.FP_PATTERNS p
-    WHERE f.status = 'new'
-      AND p.rule_id = f.rule_id
-      AND p.entity = COALESCE(f.user_name, f.src, f.dest, 'unknown')
-      AND p.fp_rate >= 0.5
-      AND p.fp_rate < 0.85
-      AND p.total_count >= 2
-      AND f.triage_notes IS NULL;
-
-    v_flagged := SQLROWCOUNT;
-
-    RETURN 'FP scoring complete. Auto-dismissed: ' || :v_dismissed
-        || ', flagged as likely-FP: ' || :v_flagged;
+    RETURN 'Suppression rules dismissed ' || :v_dismissed || '. ' || :v_conf;
 END;
 $$;
 

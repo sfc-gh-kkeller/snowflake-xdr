@@ -134,6 +134,7 @@ BEGIN
     UPDATE SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f
     SET f.status = 'resolved',
         f.disposition = 'mitigated_by_control',
+        f.disposition_source = 'control',
         f.triage_notes = COALESCE(f.triage_notes || ' | ', '')
             || 'Auto-assessed: covered by control '
             || c.name || ' (' || c.scope_note || '). Attempt was blocked.',

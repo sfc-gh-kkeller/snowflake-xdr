@@ -16,7 +16,7 @@ const EXAMPLES = [
   "Trace the attack path from host:10.1.5.107",
   "Which MITRE tactics have no detection coverage?",
   "Create and enable a rule for external port scanning",
-  "Add 185.220.101.42 as a C2 IOC with severity 5",
+  "Add login-micros0ft-support.com as a phishing domain IOC with severity 4",
   "Find alerts similar to SMB lateral movement",
 ]
 

@@ -24,6 +24,28 @@ CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.DASHBOARDS.AGENT_ACTION_LOG (
 );
 
 -- ---------------------------------------------------------------------------
+-- Shared guard for machine-written rule SQL (agent tool + Detection Autopilot).
+-- Returns NULL when the SQL is one read-only SELECT whose only fully
+-- qualified objects are SNOWFLAKE_XDR.RAW_LOGS tables, else the violation.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION SNOWFLAKE_XDR.DASHBOARDS.RULE_SQL_VIOLATION(S VARCHAR)
+RETURNS VARCHAR
+AS
+$$
+    CASE
+        WHEN NOT REGEXP_LIKE(TRIM(COALESCE(S, '')), '^(SELECT|WITH)\\s.*', 'is')
+            THEN 'must be a single SELECT (or WITH ... SELECT) statement'
+        WHEN CONTAINS(S, ';') OR CONTAINS(S, CHR(36) || CHR(36))
+          OR REGEXP_LIKE(S, '.*\\b(INSERT|UPDATE|DELETE|MERGE|DROP|CREATE|ALTER|GRANT|REVOKE|CALL|EXECUTE|COPY|PUT|GET|REMOVE|TRUNCATE|UNDROP|USE|SYSTEM\\$[A-Z_]+)\\b.*', 'is')
+            THEN 'must be read-only: no DML/DDL, CALL, multiple statements, or system functions'
+        WHEN NOT REGEXP_LIKE(S, '.*SNOWFLAKE_XDR\\.RAW_LOGS\\.[A-Z_]+.*', 'is')
+          OR REGEXP_COUNT(S, '\\b[A-Za-z_][A-Za-z0-9_$]*\\.[A-Za-z_][A-Za-z0-9_$]*\\.[A-Za-z_][A-Za-z0-9_$]*\\b')
+             != REGEXP_COUNT(S, 'SNOWFLAKE_XDR\\.RAW_LOGS\\.[A-Za-z_][A-Za-z0-9_$]*', 1, 'i')
+            THEN 'may only read fully qualified SNOWFLAKE_XDR.RAW_LOGS.<table> objects'
+    END
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Create a custom SQL detection rule written by the agent, test it against
 -- current data, and optionally enable it. The SQL must be one read-only
 -- SELECT over SNOWFLAKE_XDR.RAW_LOGS returning _time, user_name, src, dest,
@@ -72,17 +94,9 @@ BEGIN
     END IF;
 
     -- Safety: a single read-only SELECT whose only fully qualified objects are RAW_LOGS tables
-    IF (NOT REGEXP_LIKE(v_sql, '^(SELECT|WITH)\\s.*', 'is')) THEN
-        RETURN OBJECT_CONSTRUCT('error', 'p_rule_sql must be a single SELECT (or WITH ... SELECT) statement');
-    END IF;
-    IF (CONTAINS(v_sql, ';') OR CONTAINS(v_sql, CHR(36) || CHR(36))
-        OR REGEXP_LIKE(v_sql, '.*\\b(INSERT|UPDATE|DELETE|MERGE|DROP|CREATE|ALTER|GRANT|REVOKE|CALL|EXECUTE|COPY|PUT|GET|REMOVE|TRUNCATE|UNDROP|USE|SYSTEM\\$[A-Z_]+)\\b.*', 'is')) THEN
-        RETURN OBJECT_CONSTRUCT('error', 'p_rule_sql must be read-only: no DML/DDL, CALL, multiple statements, or system functions');
-    END IF;
-    IF (NOT REGEXP_LIKE(v_sql, '.*SNOWFLAKE_XDR\\.RAW_LOGS\\.[A-Z_]+.*', 'is')
-        OR REGEXP_COUNT(v_sql, '\\b[A-Za-z_][A-Za-z0-9_$]*\\.[A-Za-z_][A-Za-z0-9_$]*\\.[A-Za-z_][A-Za-z0-9_$]*\\b')
-           != REGEXP_COUNT(v_sql, 'SNOWFLAKE_XDR\\.RAW_LOGS\\.[A-Za-z_][A-Za-z0-9_$]*', 1, 'i')) THEN
-        RETURN OBJECT_CONSTRUCT('error', 'p_rule_sql may only read fully qualified SNOWFLAKE_XDR.RAW_LOGS.<table> objects');
+    v_err := SNOWFLAKE_XDR.DASHBOARDS.RULE_SQL_VIOLATION(:v_sql);
+    IF (v_err IS NOT NULL) THEN
+        RETURN OBJECT_CONSTRUCT('error', 'p_rule_sql ' || :v_err);
     END IF;
 
     INSERT INTO SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES
@@ -232,6 +246,8 @@ BEGIN
     UPDATE SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS
        SET status = :s,
            disposition = COALESCE(:d, disposition),
+           disposition_source = IFF(:d IS NULL, disposition_source, 'analyst'),
+           verdict_by = IFF(:d IS NULL, verdict_by, CURRENT_USER() || ' (Ask XDR)'),
            assigned_to = COALESCE(NULLIF(LEFT(:P_ASSIGNED_TO, 100), ''), assigned_to),
            triage_notes = COALESCE(NULLIF(LEFT(:P_NOTES, 2000), ''), triage_notes),
            triaged_at = CURRENT_TIMESTAMP()
@@ -335,6 +351,8 @@ DECLARE
 BEGIN
     CALL SNOWFLAKE_XDR.DETECTIONS.RUN_ALL_DETECTIONS() INTO :r1;
     CALL SNOWFLAKE_XDR.DETECTIONS.RUN_CUSTOM_RULES() INTO :r2;
+    -- Rules re-flag their whole lookback window on every run; keep one finding per event
+    CALL SNOWFLAKE_XDR.DETECTIONS.DEDUPE_FINDINGS();
     INSERT INTO SNOWFLAKE_XDR.DASHBOARDS.AGENT_ACTION_LOG (tool, target, params, result)
         SELECT 'run_detections', NULL, NULL, LEFT(:r1 || ' | ' || :r2, 4000);
     RETURN LEFT(:r1 || ' | ' || :r2, 4000);
