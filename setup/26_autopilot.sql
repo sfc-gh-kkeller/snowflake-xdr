@@ -859,6 +859,12 @@ def cycle(s):
         else:
             metrics, baseline = evaluate(s, ch["RULE_ID"]), None
         ok, reason = passes(metrics, p, baseline)
+        # A rule failing its detection canary never promotes (fix_broken repairs it, or a human looks)
+        if ch["RULE_ID"] and one(s, f"""SELECT COUNT(*) AS n FROM {DB}.DETECTIONS.CUSTOM_RULE_ERRORS
+                                       WHERE rule_id = ? AND stage LIKE 'canary%'
+                                         AND error_time > DATEADD('day', -1, CURRENT_TIMESTAMP())""",
+                                  [ch["RULE_ID"]])["N"]:
+            ok, reason = False, "held: failing its detection canary"
         # Self-correction: a shadow rule that misses labelled attacks gets rewritten with the misses
         if (not ok and ch["CHANGE_TYPE"] in ("new_rule", "fix_broken")
                 and (metrics.get("recall") is not None and metrics["recall"] < float(p.get("MIN_RECALL") or 0))):
@@ -955,25 +961,61 @@ def cycle(s):
         broken = rows(s, f"""
             SELECT c.*, e.err FROM {CR} c
             JOIN (SELECT rule_id, MAX(LEFT(error_message, 400)) AS err FROM {DB}.DETECTIONS.CUSTOM_RULE_ERRORS
-                  WHERE error_time > DATEADD('day', -1, CURRENT_TIMESTAMP()) GROUP BY rule_id) e
+                  WHERE error_time > DATEADD('day', -1, CURRENT_TIMESTAMP())
+                    AND COALESCE(stage, '') <> 'canary_parser'   -- broken parser: rewriting the rule would not help
+                  GROUP BY rule_id) e
               ON e.rule_id = c.rule_id
             WHERE c.language = 'sql' AND (c.enabled OR c.test_mode) AND NOT COALESCE(c.pinned, FALSE)
               AND c.managed_by <> 'autopilot_candidate'
             LIMIT {cap(p)}""")
+        # A pack rule still in install shadow is not 'busy' for a repair: pack go-live only flips flags
+        pack_shadow = {x["T"] for x in rows(s, f"""SELECT target_rule_id AS t FROM {CH}
+                          WHERE target_rule_id IS NOT NULL
+                          GROUP BY target_rule_id
+                          HAVING COUNT_IF(status IN ('proposed', 'shadow') AND change_type = 'pack_rule') > 0
+                             AND COUNT_IF(change_type <> 'pack_rule' AND (status IN ('proposed', 'shadow')
+                                 OR (status = 'failed' AND updated_at > DATEADD('day', -2, CURRENT_TIMESTAMP())))) = 0""")}
         for b in broken:
-            if b["RULE_ID"] in busy_targets:
+            if b["RULE_ID"] in busy_targets and b["RULE_ID"] not in pack_shadow:
                 continue
             task = (f"Repair this detection rule '{b['NAME']}' ({b.get('MITRE_TECHNIQUE_ID')}). It fails at runtime "
                     f"with: {b['ERR']}. Keep its intent; change only what is needed.")
+            canary_fx = None
+            if str(b["ERR"]).startswith("canary:"):
+                f = one(s, f"SELECT fixtures FROM {DB}.DETECTIONS.V_CANARY_FIXTURES WHERE rule_id = ?", [b["RULE_ID"]])
+                canary_fx = f and (json.loads(f["FIXTURES"]) if isinstance(f["FIXTURES"], str) else f["FIXTURES"])
+                if canary_fx:
+                    task = (f"Repair this detection rule '{b['NAME']}' ({b.get('MITRE_TECHNIQUE_ID')}). Its detection "
+                            f"canary failed: {b['ERR']}. The rule must match the POSITIVE fixtures and must not match "
+                            f"the NEGATIVE ones ({{{{entity}}}} is replaced by a user/source name; 'otel' fixtures are "
+                            f"raw vendor records that the CIM mapping turns into {b.get('SOURCE_TABLE')} rows). "
+                            f"Keep its intent; change only what is needed.\nPOSITIVE: "
+                            + json.dumps(canary_fx.get("positive"))[:3000] + "\nNEGATIVE: "
+                            + json.dumps(canary_fx.get("negative"))[:3000])
             rid, j, metrics, hist = author(s, cfg, task, base_rule=b)
             if not rid:
                 record(s, "fix_broken", p.get("MODE"), "failed", f"Could not repair {b['NAME']}", "",
                        b.get("MITRE_TECHNIQUE_ID"), target=b["RULE_ID"], evidence={"attempts": hist, "error": b["ERR"]})
                 continue
             ok, reason = passes(metrics, p)
+            canary = None
+            if canary_fx:
+                # A repair for a canary failure must pass that canary before it can go to shadow
+                canary = json.loads(list(one(s, f"CALL {DB}.DETECTIONS.RUN_CANARIES(?)",
+                                             [f"candidate:{rid}:{b['RULE_ID']}"]).values())[0])
+                if canary.get("status") != "pass":
+                    drop_candidate(s, rid)
+                    record(s, "fix_broken", p.get("MODE"), "failed", f"Repair of {b['NAME']} failed its canary",
+                           "The rewritten rule still does not pass the detection canary: " + str(canary.get("message")),
+                           b.get("MITRE_TECHNIQUE_ID"), target=b["RULE_ID"],
+                           evidence={"error": b["ERR"], "canary": canary, "attempts": hist})
+                    summary["failed"].append(b["RULE_ID"])
+                    continue
+                reason = "passes its detection canary; " + reason
             handle("fix_broken", f"Fix rule: {b['NAME']}", j.get("rationale"), rid=rid, target=b["RULE_ID"],
                    technique=b.get("MITRE_TECHNIQUE_ID"), severity=b["SEVERITY"],
                    evidence={"error": b["ERR"], "metrics": metrics, "gate": {"ok": ok, "reason": reason},
+                             "canary": canary,
                              "before": {"code": b["CODE"], "threshold_count": b["THRESHOLD_COUNT"]},
                              "sql": rule(s, rid)["CODE"], "attempts": hist}, ok=ok, reason=reason)
 

@@ -169,9 +169,23 @@ def cleanup(s, touched, started):
                                || '|' || COALESCE(description, '')), '{MARK}')""", params=[started]).collect()
 
 
-def run_one(s, cache, f, batch):
+def landed(s, table, marker):
+    """Did the fixture reach the rule's CIM table at all? If not, the parser / mapping is broken, not the rule."""
+    t = (table or "").upper()
+    if not TABLE_RE.match(t):
+        return None
+    cols = table_columns(s, {}, t)
+    cond = " OR ".join(f"CONTAINS(LOWER(COALESCE({c}::VARCHAR, '')), ?)" for c in ("user_name", "src", "dest", "_raw")
+                       if c in cols) or "FALSE"
+    return int(one(s, f"SELECT COUNT(*) AS n FROM {DB}.RAW_LOGS.{t} WHERE {cond}",
+                   [marker.lower()] * cond.count("?"))["N"])
+
+
+def run_one(s, cache, f, batch, candidate=None):
+    """candidate: test another rule's code (an autopilot repair) against this rule's fixtures; nothing is recorded."""
     rid = f["RULE_ID"]
-    rule = one(s, f"SELECT * FROM {DB}.DETECTIONS.CUSTOM_RULES WHERE rule_id = ? AND language = 'sql'", [rid])
+    rule = one(s, f"SELECT * FROM {DB}.DETECTIONS.CUSTOM_RULES WHERE rule_id = ? AND language = 'sql'",
+               [candidate or rid])
     if not rule:
         return None
     fx = json.loads(f["FIXTURES"]) if isinstance(f["FIXTURES"], str) else f["FIXTURES"]
@@ -193,8 +207,13 @@ def run_one(s, cache, f, batch):
         pos, neg = n_pos >= need, n_neg >= need
         within = latency <= float(f["EXPECTED_LATENCY_SECONDS"] or 300)
         status = "pass" if pos and not neg and within else "fail"
+        arrived = landed(s, rule["SOURCE_TABLE"], pos_m) if not pos else None
         detail.update({"positive_matches": n_pos, "needed": need, "negative_matches": n_neg,
+                       "fixture_rows_in_table": arrived,
+                       "cause": ("parser" if arrived == 0 else "rule") if status != "pass" else None,
                        "message": ("ok" if status == "pass" else
+                                   f"fixture never reached {rule['SOURCE_TABLE']}: the source's parser / CIM mapping "
+                                   "is broken or paused, the rule itself may be fine" if arrived == 0 else
                                    "positive fixture did not fire" if not pos else
                                    "negative fixture fired (false positive)" if neg else
                                    f"fired too slowly ({latency}s)")})
@@ -205,13 +224,18 @@ def run_one(s, cache, f, batch):
             cleanup(s, touched, started)
         except Exception as e:
             detail["cleanup_error"] = str(e)[:200]
+    if candidate:
+        return {"rule_id": rid, "candidate": candidate, "status": status, **detail}
     s.sql(f"""INSERT INTO {DB}.DETECTIONS.CANARY_RUNS (batch_id, rule_id, status, positive_fired, negative_fired,
                 latency_seconds, detail) SELECT ?, ?, ?, ?, ?, ?, PARSE_JSON(?)""",
           params=[batch, rid, status, pos, neg, latency if latency is not None else -1, json.dumps(detail)]).collect()
     if status != "pass":
-        # The autopilot's fix_broken step repairs rules with recent errors; Mission Control lists the failure
+        # Rule logic failures feed the autopilot's fix_broken step (stage 'canary'); parser failures are
+        # recorded separately (stage 'canary_parser') so a correct rule is not rewritten for a broken mapping.
+        # Mission Control lists both.
         s.sql(f"""INSERT INTO {DB}.DETECTIONS.CUSTOM_RULE_ERRORS (rule_id, error_message, stage)
-                  SELECT ?, ?, 'canary'""", params=[rid, "canary: " + detail.get("message", "failed")]).collect()
+                  SELECT ?, ?, ?""", params=[rid, "canary: " + detail.get("message", "failed"),
+                                            "canary_parser" if detail.get("cause") == "parser" else "canary"]).collect()
     return {"rule_id": rid, "status": status, **{k: detail.get(k) for k in ("message", "positive_matches", "negative_matches")},
             "latency_seconds": latency}
 
@@ -248,6 +272,13 @@ def main(s, P_RULE_ID):
     want = (P_RULE_ID or "all")
     if want.lower().startswith("seed:"):
         return seed(s, want.split(":", 1)[1].lower() or "all")
+    if want.lower().startswith("candidate:"):
+        # candidate:<candidate_rule_id>:<target_rule_id> - does a repaired rule pass the target's canary?
+        _, cand, target = (want.split(":") + ["", ""])[:3]
+        f = one(s, f"SELECT * FROM {DB}.DETECTIONS.V_CANARY_FIXTURES WHERE rule_id = ?", [target])
+        if not f:
+            return {"status": "no_fixture", "rule_id": target}
+        return run_one(s, {}, f, batch, candidate=cand) or {"status": "error", "message": "candidate not found"}
     fixtures = rows(s, f"""SELECT v.* FROM {DB}.DETECTIONS.V_CANARY_FIXTURES v
                            JOIN {DB}.DETECTIONS.CUSTOM_RULES c ON c.rule_id = v.rule_id
                            WHERE (? = 'all' AND (c.enabled OR c.test_mode)) OR v.rule_id = ?
