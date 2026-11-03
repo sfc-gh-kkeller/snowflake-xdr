@@ -208,7 +208,9 @@ sql_file "$CHANNELS_SQL"
 
 for f in 12_api_udf 13_response_playbooks 14_platform_ops 15_platform_pro \
          16_attack_graph 18_controls 19_fp_suppression 20_live_feed \
-         24_agent_actions 26_autopilot 28_threat_intel 29_confidence 30_otel_ingest 32_incident_tracking 33_ticketing 21_cortex_agent 22_demo_seed 23_time_shift; do
+         24_agent_actions 26_autopilot 28_threat_intel 29_confidence 30_otel_ingest 32_incident_tracking 33_ticketing \
+         34_rule_packs 35_snowflake_pack 36_oversight 37_threat_profile 38_canaries 39_response 40_pack_sources \
+         21_cortex_agent 22_demo_seed 23_time_shift; do
     sql_file "setup/$f.sql"
 done
 
@@ -281,6 +283,22 @@ sql_call "SEED_OTEL_DEMO"            "CALL SNOWFLAKE_XDR.RAW_LOGS.SEED_OTEL_DEMO
 sql_call "DETECT_BRUTE_FORCE (OTel)" "CALL SNOWFLAKE_XDR.DETECTIONS.DETECT_BRUTE_FORCE()"
 # Cases: route P1/P2 incidents to the demo tracker, create the tickets, check SLAs (32/33_*.sql)
 sql_call "SYNC_TICKETS"              "CALL SNOWFLAKE_XDR.INCIDENTS.SYNC_TICKETS('all')"
+# Phase 4: Snowflake telemetry lanes, rule packs, threat profile, canaries, demo compromise (34-40_*.sql)
+sql_call "SYNC_SNOWFLAKE_TELEMETRY"  "CALL SNOWFLAKE_XDR.REFERENCE.SYNC_SNOWFLAKE_TELEMETRY('all')"
+log "loading rule packs (rule-packs/*/pack.yaml)"
+bash scripts/load_rule_packs.sh "$CONN" >> "$RUN_LOG" 2>&1 || fail "scripts/load_rule_packs.sh"
+for pk in entra okta databricks postgres clickhouse salesforce; do   # demo: install every pack in shadow
+    sql_call "INSTALL_RULE_PACK $pk"  "CALL SNOWFLAKE_XDR.REFERENCE.INSTALL_RULE_PACK('$pk', TRUE)"
+done
+sql_call "SEED_PACK_DEMO"            "CALL SNOWFLAKE_XDR.DETECTIONS.RUN_CANARIES('seed:all')"
+sql_call "RUN_CANARIES"              "CALL SNOWFLAKE_XDR.DETECTIONS.RUN_CANARIES('all')"
+sql_call "TRUST_LADDER"              "CALL SNOWFLAKE_XDR.DETECTIONS.TRUST_LADDER(NULL)"
+sql_call "SEED_DEMO_COMPROMISE"      "CALL SNOWFLAKE_XDR.INCIDENTS.SEED_DEMO_COMPROMISE()"
+if [[ $SKIP_AI -eq 0 ]]; then
+    sql_call "THREAT_PROFILE"        "CALL SNOWFLAKE_XDR.REFERENCE.THREAT_PROFILE_ENGINE('set_profile', '{\"statement\": \"EU fintech, ransomware and insider theft\"}')"
+    sql_call "THREAT_PROFILE_ENGINE" "CALL SNOWFLAKE_XDR.REFERENCE.THREAT_PROFILE_ENGINE('cycle', '30')"
+    sql_call "AUTO_INVESTIGATE"      "CALL SNOWFLAKE_XDR.INCIDENTS.AUTO_INVESTIGATE('new')"
+fi
 if [[ $OTEL_RECEIVER -eq 1 ]]; then
     log "deploying the OTLP receiver (Snowpark Container Services)"
     scripts/deploy_otel_receiver.sh -c "$CONN" >> "$RUN_LOG" 2>&1 || fail "deploy_otel_receiver.sh (see $RUN_LOG)"
@@ -353,6 +371,10 @@ check "attack graph edges"              "$(scalar "SELECT COUNT(*) FROM SNOWFLAK
 check "findings mitigated by controls"  "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS WHERE disposition = 'mitigated_by_control'")" 1
 check "findings auto-suppressed (FP)"   "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS WHERE triage_notes LIKE '%Auto-suppressed by FP model%'")" 1
 check "OTel records mapped into CIM"    "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION WHERE index_name = 'otel'")" 1
+check "rule-pack rules installed"        "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES WHERE pack_id IS NOT NULL")" 80
+check "canaries passing"                 "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.DETECTIONS.V_VERIFIED_COVERAGE WHERE verification = 'verified'")" 80
+check "Snowflake telemetry (fast lane)"  "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY WHERE vendor_product = 'snowflake'")" 1
+check "demo compromise case"             "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.INCIDENTS.INCIDENTS WHERE primary_entity = 'XDR_DEMO_COMPROMISED'")" 1
 check "incidents with a ticket"         "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.INCIDENTS.INCIDENT_TICKETS WHERE sync_status = 'ok'")" 1
 check "live-feed events (last hour)"    "$(scalar "SELECT COUNT(*) FROM SNOWFLAKE_XDR.DETECTIONS.V_LIVE_FEED")" 1
 HOPS=$(scalar "CALL SNOWFLAKE_XDR.DETECTIONS.TRACE_ATTACK_PATHS('host:10.1.5.107')" | python3 -c '

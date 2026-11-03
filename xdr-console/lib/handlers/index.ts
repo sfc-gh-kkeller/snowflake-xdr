@@ -12,6 +12,7 @@ import { autopilot } from "@/lib/handlers/autopilot"
 import { intel } from "@/lib/handlers/intel"
 import { sources } from "@/lib/handlers/sources"
 import { cases } from "@/lib/handlers/cases"
+import { mission, packs, threat } from "@/lib/handlers/mission"
 
 export type Handler = (params: Record<string, unknown>) => Promise<unknown>
 
@@ -32,6 +33,9 @@ export const handlers: Record<string, Handler> = {
   ...intel,
   ...sources,
   ...cases,
+  ...mission,
+  ...packs,
+  ...threat,
 }
 
 export function getHandler(name: string): Handler | null {

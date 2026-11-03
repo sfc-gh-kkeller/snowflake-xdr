@@ -1,0 +1,38 @@
+# PostgreSQL jsonlog (with pgaudit) -> Snowflake XDR, using the OpenTelemetry Collector.
+#
+# postgresql.conf:
+#   shared_preload_libraries = 'pgaudit'
+#   pgaudit.log = 'ddl, role, write, misc'
+#   log_destination = 'jsonlog'          # PostgreSQL 15+
+#   logging_collector = on
+#   log_connections = on                 # "connection authorized" lines feed PG-009
+#
+# Each jsonlog line is one JSON object; it is sent unchanged as the log body and the
+# shipped `postgres` mapping turns pgaudit and authentication lines into DATABASE_ACTIVITY.
+#
+#   XDR_ENDPOINT=https://<ingress>.snowflakecomputing.app/v1/logs XDR_PAT=... otelcol-contrib --config postgres.yaml
+receivers:
+  filelog/postgres:
+    include: [/var/lib/postgresql/data/log/*.json, /var/log/postgresql/*.json]
+    start_at: end
+
+processors:
+  resource/postgres:
+    attributes:
+      - {key: service.name, value: postgres, action: upsert}
+      - {key: host.name, value: "${env:HOSTNAME}", action: upsert}
+  batch: {}
+
+exporters:
+  otlphttp/xdr:
+    logs_endpoint: ${env:XDR_ENDPOINT}
+    compression: gzip
+    headers:
+      Authorization: Snowflake Token="${env:XDR_PAT}"
+
+service:
+  pipelines:
+    logs:
+      receivers: [filelog/postgres]
+      processors: [resource/postgres, batch]
+      exporters: [otlphttp/xdr]

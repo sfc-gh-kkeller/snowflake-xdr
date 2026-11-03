@@ -4,14 +4,14 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import {
   LayoutDashboard, ListChecks, FolderSearch, UserSearch, Network, Radio, Crosshair,
-  MessageSquareText, ShieldCheck, FileCode2, Zap, Gauge, Bot, Radar, Cable, Ticket, type LucideIcon,
+  MessageSquareText, ShieldCheck, FileCode2, Zap, Gauge, Bot, Radar, Cable, Ticket, Compass, type LucideIcon,
 } from "lucide-react"
 import { NAV } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 
 const ICONS: Record<string, LucideIcon> = {
   LayoutDashboard, ListChecks, FolderSearch, UserSearch, Network, Radio, Crosshair,
-  MessageSquareText, ShieldCheck, FileCode2, Zap, Gauge, Bot, Radar, Cable, Ticket,
+  MessageSquareText, ShieldCheck, FileCode2, Zap, Gauge, Bot, Radar, Cable, Ticket, Compass,
 }
 
 /** Persona-grouped sidebar navigation. */

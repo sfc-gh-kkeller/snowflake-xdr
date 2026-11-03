@@ -164,12 +164,25 @@ BEGIN
              AND COALESCE(o.disposition_source, '') NOT IN ('fp_model', 'confidence_model', 'suppression')
             GROUP BY c.finding_id
         ),
+        tc_ents AS (   -- entities at risk in Trust Center findings (setup/35_snowflake_pack.sql), 7 days
+            SELECT DISTINCT LOWER(e.value:entity_name::VARCHAR) AS ent, f.rule_id
+            FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f, LATERAL FLATTEN(INPUT => f.affected_entities) e
+            WHERE f.detection_source = 'trust_center' AND f.detection_time > DATEADD('day', -7, CURRENT_TIMESTAMP())
+              AND e.value:entity_name IS NOT NULL
+        ),
+        tc AS (
+            SELECT c.finding_id, ARRAY_SLICE(ARRAY_AGG(DISTINCT t.rule_id), 0, 3) AS tc_rules
+            FROM cand c JOIN tc_ents t ON t.ent IN (LOWER(c.keys[0]::VARCHAR), LOWER(c.keys[1]::VARCHAR), LOWER(c.keys[2]::VARCHAR))
+            WHERE c.rule_id NOT LIKE 'TC-%'
+            GROUP BY c.finding_id
+        ),
         x AS (
             SELECT c.*, rp.precision AS rule_p, rp.judged AS rule_n, rp.tp AS rule_tp, rp.fp AS rule_fp,
                    p.fp_count AS ent_fp, p.tp_count AS ent_tp, p.total_count AS ent_n,
                    COALESCE(cr.n_rules, 0) AS n_corr, cr.rules AS corr_rules,
-                   i.confidence AS ioc_conf, i.ioc_value AS ioc_value
+                   i.confidence AS ioc_conf, i.ioc_value AS ioc_value, tc.tc_rules
             FROM cand c
+            LEFT JOIN tc ON tc.finding_id = c.finding_id
             LEFT JOIN SNOWFLAKE_XDR.DETECTIONS.V_RULE_PRECISION rp ON rp.rule_id = c.rule_id
             LEFT JOIN SNOWFLAKE_XDR.DETECTIONS.FP_PATTERNS p ON p.rule_id = c.rule_id AND p.entity = c.entity
             LEFT JOIN corr cr ON cr.finding_id = c.finding_id
@@ -187,14 +200,15 @@ BEGIN
                    CASE WHEN n_corr >= 2 THEN 2.2 WHEN n_corr = 1 THEN 1.4 ELSE 0 END AS corr_lo,
                    IFF(incident_id IS NOT NULL, 0.7, 0) AS inc_lo,
                    IFF(ioc_conf IS NULL, 0, (ioc_conf / 100 - 0.5) * 3) AS ioc_lo,
-                   IFF(ai_fp_probability IS NULL, 0, -(ai_fp_probability - 0.5) * 1.5) AS ai_lo
+                   IFF(ai_fp_probability IS NULL, 0, -(ai_fp_probability - 0.5) * 1.5) AS ai_lo,
+                   IFF(tc_rules IS NULL, 0, 1.0) AS tc_lo
             FROM x
         )
         SELECT finding_id,
-               ROUND(1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo))), 3) AS score,
-               CASE WHEN 1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo)))
+               ROUND(1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo + tc_lo))), 3) AS score,
+               CASE WHEN 1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo + tc_lo)))
                          >= SNOWFLAKE_XDR.DETECTIONS.CONF_SETTING('high_threshold') THEN 'high'
-                    WHEN 1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo)))
+                    WHEN 1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo + tc_lo)))
                          < SNOWFLAKE_XDR.DETECTIONS.CONF_SETTING('low_threshold') THEN 'low'
                     ELSE 'medium' END AS band,
                ARRAY_CONSTRUCT_COMPACT(
@@ -210,7 +224,9 @@ BEGIN
                    IFF(ioc_conf IS NOT NULL, OBJECT_CONSTRUCT('factor', 'IOC confidence', 'effect', ROUND(ioc_lo, 2),
                        'detail', ioc_value || ' scored ' || ioc_conf || '/100 by threat intel'), NULL),
                    IFF(ai_lo <> 0, OBJECT_CONSTRUCT('factor', 'AI second opinion', 'effect', ROUND(ai_lo, 2),
-                       'detail', ROUND(ai_fp_probability * 100) || '% likely false positive'), NULL)) AS factors
+                       'detail', ROUND(ai_fp_probability * 100) || '% likely false positive'), NULL),
+                   IFF(tc_lo <> 0, OBJECT_CONSTRUCT('factor', 'Trust Center', 'effect', tc_lo,
+                       'detail', 'entity is at risk in Snowflake Trust Center: ' || ARRAY_TO_STRING(tc_rules, ', ')), NULL)) AS factors
         FROM e
     ) s
     WHERE t.finding_id = s.finding_id;
@@ -230,6 +246,10 @@ BEGIN
 
     -- Auto-suppress: low confidence + learned human FP pattern + no corroboration
     SELECT MAX(mode) INTO :v_mode FROM SNOWFLAKE_XDR.DETECTIONS.AUTOPILOT_POLICY WHERE change_type = 'auto_suppress';
+    -- the Mission Control kill switch stops automatic suppression
+    IF (SNOWFLAKE_XDR.DETECTIONS.AUTONOMY_PAUSED()) THEN
+        v_mode := 'paused';
+    END IF;
     IF (COALESCE(v_mode, 'auto_live') = 'auto_live') THEN
         UPDATE SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS f
         SET f.status = 'dismissed', f.disposition = 'false_positive', f.disposition_source = 'confidence_model',

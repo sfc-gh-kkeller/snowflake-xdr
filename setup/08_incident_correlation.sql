@@ -30,6 +30,9 @@ BEGIN
         FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS
         WHERE incident_id IS NULL
           AND status != 'dismissed'
+          -- Trust Center posture findings describe configuration, not activity: they inform
+          -- confidence and the briefing but never form a case on their own
+          AND COALESCE(category, '') <> 'posture'
     ),
     entity_groups AS (
         SELECT

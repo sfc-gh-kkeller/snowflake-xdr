@@ -90,8 +90,9 @@ BEGIN
         RETURN 'ERROR: rule not found';
     END IF;
 
-    -- Materialize matched rows (dynamic DDL needs no INTO)
-    LET stage_sql VARCHAR := 'CREATE OR REPLACE TEMPORARY TABLE XDR_CUSTOM_RULE_MATCHES AS SELECT user_name, src, dest, _time, description FROM (' || :v_code || ') WHERE _time > DATEADD(''minute'', ' || (-1 * :v_lookback) || ', CURRENT_TIMESTAMP())';
+    -- Materialize matched rows (dynamic DDL needs no INTO). Detection canary rows
+    -- (setup/38_canaries.sql, marker 'xdrcanary') never become findings here.
+    LET stage_sql VARCHAR := 'CREATE OR REPLACE TEMPORARY TABLE XDR_CUSTOM_RULE_MATCHES AS SELECT user_name, src, dest, _time, description FROM (' || :v_code || ') WHERE _time > DATEADD(''minute'', ' || (-1 * :v_lookback) || ', CURRENT_TIMESTAMP()) AND NOT CONTAINS(LOWER(COALESCE(user_name::VARCHAR, '''') || ''|'' || COALESCE(src::VARCHAR, '''') || ''|'' || COALESCE(dest::VARCHAR, '''')), ''xdrcanary'')';
     EXECUTE IMMEDIATE (:stage_sql);
 
     IF (:P_DRY_RUN) THEN
@@ -112,17 +113,26 @@ BEGIN
     SELECT
         UUID_STRING(),
         :P_RULE_ID,
-        :v_name || ' - ' || COALESCE(user_name, src, 'unknown'),
+        :v_name || ' - ' || COALESCE(g.user_name, g.src, 'unknown'),
         :v_cat, :v_sev, :v_tactic, :v_tech,
-        user_name, src, dest,
-        MIN(_time), CURRENT_TIMESTAMP(), 'custom_rule', 80,
-        COUNT(*),
-        OBJECT_CONSTRUCT('matched_events', COUNT(*), 'window_minutes', :v_window),
+        g.user_name, g.src, g.dest,
+        g.first_time, CURRENT_TIMESTAMP(), 'custom_rule', 80,
+        g.n,
+        OBJECT_CONSTRUCT('matched_events', g.n, 'window_minutes', :v_window),
         :v_sev * 20, 'new'
-    FROM XDR_CUSTOM_RULE_MATCHES
-    GROUP BY user_name, src, dest,
-             FLOOR(DATEDIFF('minute', '2000-01-01'::TIMESTAMP, _time) / :v_window)
-    HAVING COUNT(*) >= :v_thresh;
+    FROM (
+        SELECT user_name, src, dest, MIN(_time) AS first_time, COUNT(*) AS n
+        FROM XDR_CUSTOM_RULE_MATCHES
+        GROUP BY user_name, src, dest,
+                 FLOOR(DATEDIFF('minute', '2000-01-01'::TIMESTAMP, _time) / :v_window)
+        HAVING COUNT(*) >= :v_thresh
+    ) g
+    -- overlapping lookbacks re-see the same window: one finding per rule, entity and window
+    LEFT JOIN (SELECT user_name, src, dest, event_time FROM IDENTIFIER(:v_target)
+               WHERE rule_id = :P_RULE_ID) f
+      ON EQUAL_NULL(f.user_name, g.user_name) AND EQUAL_NULL(f.src, g.src)
+     AND EQUAL_NULL(f.dest, g.dest) AND f.event_time = g.first_time
+    WHERE f.event_time IS NULL;
 
     LET inserted NUMBER := SQLROWCOUNT;
     UPDATE SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES

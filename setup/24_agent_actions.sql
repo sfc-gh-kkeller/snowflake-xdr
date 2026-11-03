@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.DASHBOARDS.AGENT_ACTION_LOG (
 -- Returns NULL when the SQL is one read-only SELECT whose only fully
 -- qualified objects are SNOWFLAKE_XDR.RAW_LOGS tables, else the violation.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION SNOWFLAKE_XDR.DASHBOARDS.RULE_SQL_VIOLATION(S VARCHAR)
+CREATE OR REPLACE FUNCTION SNOWFLAKE_XDR.DASHBOARDS.RULE_SQL_VIOLATION_RAW(S VARCHAR)
 RETURNS VARCHAR
 AS
 $$
@@ -43,6 +43,14 @@ $$
              != REGEXP_COUNT(S, 'SNOWFLAKE_XDR\\.RAW_LOGS\\.[A-Za-z_][A-Za-z0-9_$]*', 1, 'i')
             THEN 'may only read fully qualified SNOWFLAKE_XDR.RAW_LOGS.<table> objects'
     END
+$$;
+
+CREATE OR REPLACE FUNCTION SNOWFLAKE_XDR.DASHBOARDS.RULE_SQL_VIOLATION(S VARCHAR)
+RETURNS VARCHAR
+AS
+$$
+    -- String literals are blanked first: a value such as query_type = 'GRANT' is data, not a statement
+    SNOWFLAKE_XDR.DASHBOARDS.RULE_SQL_VIOLATION_RAW(REGEXP_REPLACE(COALESCE(S, ''), '\'[^\']*\'', '\'\''))
 $$;
 
 -- ---------------------------------------------------------------------------

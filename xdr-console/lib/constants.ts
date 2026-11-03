@@ -12,7 +12,8 @@ export const NAV: NavGroup[] = [
   {
     persona: "SOC Analyst",
     items: [
-      { href: "/", label: "Overview", icon: "LayoutDashboard" },
+      { href: "/", label: "Mission Control", icon: "Compass" },
+      { href: "/overview", label: "Overview", icon: "LayoutDashboard" },
       { href: "/triage", label: "Triage & Cases", icon: "ListChecks" },
       { href: "/investigations", label: "Investigations", icon: "FolderSearch" },
       { href: "/cases", label: "Cases & Tickets", icon: "Ticket" },

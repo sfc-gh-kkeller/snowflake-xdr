@@ -327,6 +327,18 @@ export const response = {
 export const posture = {
   "posture.metrics": async () => one("SELECT * FROM SNOWFLAKE_XDR.DETECTIONS.V_POSTURE_METRICS"),
 
+  /** Verified (canary-proven) coverage, setup/38_canaries.sql, against the threat profile (37). */
+  "posture.verified": async () =>
+    one(`
+      SELECT (SELECT COUNT_IF(verification = 'verified') FROM SNOWFLAKE_XDR.DETECTIONS.V_VERIFIED_COVERAGE) AS verified,
+             (SELECT COUNT_IF(verification IN ('verified', 'failing')) FROM SNOWFLAKE_XDR.DETECTIONS.V_VERIFIED_COVERAGE) AS tested,
+             (SELECT COUNT_IF(verification = 'failing') FROM SNOWFLAKE_XDR.DETECTIONS.V_VERIFIED_COVERAGE) AS failing,
+             (SELECT COUNT(DISTINCT mitre_technique_id) FROM SNOWFLAKE_XDR.DETECTIONS.V_VERIFIED_COVERAGE
+               WHERE verification = 'verified') AS verified_techniques,
+             (SELECT 100 * COUNT_IF(coverage = 'verified') / NULLIF(COUNT(*), 0) FROM SNOWFLAKE_XDR.REFERENCE.V_THREAT_HEATMAP
+               WHERE score >= 12) AS threat_verified_pct,
+             (SELECT COUNT_IF(coverage = 'gap') FROM SNOWFLAKE_XDR.REFERENCE.V_THREAT_HEATMAP WHERE score >= 12) AS threat_gaps`),
+
   "posture.responseHealth": async () =>
     rows(`
       SELECT action_type, COUNT(*) AS executed, SUM(IFF(status = 'success', 1, 0)) AS succeeded

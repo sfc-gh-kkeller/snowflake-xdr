@@ -16,8 +16,8 @@ standard OpenTelemetry (OTLP); incidents go out to Jira or ServiceNow.
 | ![Threat Hunting](docs/screenshots/hunt.png) | ![Detections](docs/screenshots/detections.png) |
 | **Security Posture** | **Cases & Tickets** |
 | ![Security Posture](docs/screenshots/posture.png) | ![Cases & Tickets](docs/screenshots/cases.jpg) |
-| **Data Sources (OpenTelemetry)** | |
-| ![Data Sources](docs/screenshots/sources.jpg) | |
+| **Data Sources (OpenTelemetry)** | **Mission Control** |
+| ![Data Sources](docs/screenshots/sources.jpg) | ![Mission Control](docs/screenshots/mission.jpg) |
 
 ## What's in it
 
@@ -48,6 +48,21 @@ standard OpenTelemetry (OTLP); incidents go out to Jira or ServiceNow.
   the Detection Autopilot writes the mapping for sources it has never seen
 - **Cases & tickets** — NIST-style incident lifecycle with an audit trail, response tasks,
   SLAs and Cortex-written incident reports, synced both ways with Jira or ServiceNow
+- **Rule packs** — 87 best-practice detections for Snowflake, AWS, Entra ID / Azure, Okta,
+  Databricks, PostgreSQL, ClickHouse and Salesforce that install themselves (in shadow)
+  as soon as their data arrives; the Snowflake pack reads INFORMATION_SCHEMA (minutes),
+  ACCOUNT_USAGE (history) and Trust Center findings
+- **Threat-informed autonomy** — a threat profile from the customer's own words plus
+  their incidents and KEV entries for products they run ranks what the autopilot builds
+  next; new KEV entries trigger a 30-day retro-hunt
+- **Detection canaries** — every pack rule proves daily that it fires on its attack
+  fixture and not on its benign one (through ingest and the parser); coverage shown is
+  verified, not claimed. Change types earn more autonomy from their track record
+- **Mission Control** — one page to stay in charge: what needs you, a ledger of every
+  AI action with undo, a kill switch, a daily change budget and a morning briefing
+- **Approval-gated response** — auto-investigation of P1/P2 cases and
+  `contain_snowflake_user` (roles stripped to PUBLIC, exact undo) limited in SQL to an
+  allowlisted demo user
 - **Splunk CIM compatible** — DB Connect can query `SPLUNK_VIEWS` directly
 
 ## Deploy end to end
@@ -106,7 +121,8 @@ Console views:
 
 | Persona | View | Replaces (Streamlit pages) |
 |---|---|---|
-| SOC analyst | Overview | SOC Overview |
+| SOC analyst | Mission Control (home: needs-you queue, AI ledger with undo, kill switch, threat heatmap, rule packs, canaries, trust ladder, briefing) | new |
+| | Overview | SOC Overview |
 | | Triage & Cases | Triage Queue, Case Management |
 | | Investigations | Incident View |
 | | Cases & Tickets (lifecycle, tasks, SLA, reports, Jira/ServiceNow sync, demo tracker) | new |
@@ -389,6 +405,95 @@ a live site from this repo yet. The mock and webhook paths are tested end to end
 Ask XDR can work cases too (tools `case_action`, `ticketing_status`): "comment on this incident,
 open a ticket and give me the key".
 
+## Autonomy with oversight: rule packs, threat profile, canaries, Mission Control
+
+The platform runs detection engineering and first-line response on its own and keeps a
+human in charge. Everything below is wired into the autopilot policy, the kill switch and
+the ledger.
+
+### Rule packs (`setup/34_rule_packs.sql`, `rule-packs/*/pack.yaml`)
+
+| Pack | Rules | Reads | Data |
+|---|---|---|---|
+| Snowflake | 18 | `DATABASE_ACTIVITY`, `AUTHENTICATION` | `SYNC_SNOWFLAKE_TELEMETRY` (below) |
+| AWS | 13 | `CLOUD_API` | CloudTrail via OTel (`aws_cloudtrail`) |
+| Entra ID and Azure | 12 | `AUTHENTICATION`, `CLOUD_API` | `entra_azure_forwarder.py` (Event Hubs) |
+| Okta | 10 | `AUTHENTICATION`, `CLOUD_API` | `okta_forwarder.py` |
+| Databricks | 9 | `DATABASE_ACTIVITY` | `databricks_forwarder.py` (system.access.audit) |
+| PostgreSQL | 9 | `DATABASE_ACTIVITY` | `postgres.yaml` (jsonlog + pgaudit) |
+| ClickHouse | 8 | `DATABASE_ACTIVITY` | `clickhouse_forwarder.py` (system.query_log) |
+| Salesforce | 8 | `DATABASE_ACTIVITY` | `salesforce_forwarder.py` (event monitoring, setup audit trail) |
+
+`DATABASE_ACTIVITY` is a new CIM table for data-platform audit logs; `setup/40_pack_sources.sql`
+ships the OTel mappings. Installs are coverage-aware: a rule installs (as an autopilot
+`pack_rule` change, shadow first) only once its source has data, so connecting a new system
+switches its pack on without anyone doing anything. Pack updates replace rule code unless the
+rule is pinned or edited by a person; the previous version stays in history.
+
+```bash
+scripts/load_rule_packs.sh <connection>           # load all packs, install what has data
+python3 scripts/gen_rule_packs.py                 # regenerate the non-Snowflake packs
+```
+
+### Snowflake telemetry lanes (`setup/35_snowflake_pack.sql`)
+
+| Lane | Source | Latency | Task |
+|---|---|---|---|
+| fast | `INFORMATION_SCHEMA.LOGIN_HISTORY()` / `QUERY_HISTORY()` | minutes | `TASK_SNOWFLAKE_FAST_LANE`, 5 min, then the rules |
+| history | `ACCOUNT_USAGE` login / query history / sessions | 45 min - 3 h | `TASK_SNOWFLAKE_HISTORY_LANE`, hourly; dedupes and adds client IP |
+| Trust Center | `SNOWFLAKE.TRUST_CENTER.FINDINGS` | up to 3 h | same task; open findings become `TC-<scanner>` findings |
+
+Trust Center at-risk entities also raise the confidence of other findings on the same entity.
+Needs `IMPORTED PRIVILEGES` on `SNOWFLAKE` and the `SNOWFLAKE.TRUST_CENTER_VIEWER` application role.
+
+### Threat profile (`setup/37_threat_profile.sql`)
+
+Type who you are in Mission Control ("EU fintech, ransomware and insider theft"). Cortex maps
+it to ATT&CK groups and techniques; the customer's own findings and KEV entries for products
+in the environment profile (systems sending data, privileged identities, sensitive-tagged and
+most-read tables) are added. Each technique is scored likelihood x impact and the autopilot
+backlog is ranked by threat x data available x coverage gap; every proposal says why it was
+ranked. A new KEV entry matching the environment triggers a 30-day retro-hunt (hits become
+findings and a case), a rule proposal and an exposure item in the briefing.
+
+### Canaries and the trust ladder (`setup/38_canaries.sql`)
+
+`RUN_CANARIES('all')` (daily) injects each rule's attack and benign fixtures, through
+`INGEST_OTLP_LOGS` and the live mapping where the fixture is a raw vendor record, and checks
+the rule fires on the first and not the second. Canary data and anything it triggers are
+removed straight away. A failure goes to Needs-you and becomes a `fix_broken` change, so a
+broken parser shows up the same day. `RUN_CANARIES('seed:all')` reuses the fixtures as demo data.
+`TRUST_LADDER()` proposes a one-step autonomy promotion per change type once its approvals,
+canary pass rate and precision earn it, and demotes automatically after a rollback or canary failure.
+
+### Mission Control (`setup/36_oversight.sql`, console home page)
+
+- **Needs you**: approvals, spot checks, response approvals, SLA breaches, failed ticket syncs,
+  failing canaries and autonomy promotions in one ranked queue, decided with one click.
+- **What the AI did**: `V_AI_ACTION_LEDGER` over every automatic change, with reason, evidence and undo
+  (`UNDO_AI_ACTION`).
+- **Kill switch** (`SET_AUTONOMY`): stops the autopilot, auto-suppression, pack installs, ticket
+  routing and automatic response at once. **Daily change budget** in total and per change type.
+- **Morning briefing** (`MORNING_BRIEFING`, 07:00 UTC email + webhook).
+- Agent tools: `what_did_you_do`, `undo_action`, `needs_human`, `request_response`.
+
+### Auto-investigation and response (`setup/39_response.sql`)
+
+P1/P2 or high-confidence cases are investigated by `AUTO_INVESTIGATE` (pivots, blast radius,
+Trust Center, intel, database activity; Cortex writes the note from those facts only) and get
+a drafted report. Response actions are `automatic`, `approval` or `recommendation`.
+`contain_snowflake_user` removes every granted role except PUBLIC and records them for exact
+undo; it does not disable the user or revoke tokens. The owner's-rights procedure refuses
+unless the run was approved by a person, the user is on `RESPONSE_TARGET_ALLOWLIST` (shipped
+with only `XDR_DEMO_COMPROMISED`, a login-disabled demo user), the user holds no ACCOUNTADMIN /
+SECURITYADMIN / ORGADMIN, and it is not the caller.
+
+```sql
+CALL SNOWFLAKE_XDR.INCIDENTS.SEED_DEMO_COMPROMISE();   -- password guessing, 2.4M-row read, COPY INTO s3://
+CALL SNOWFLAKE_XDR.INCIDENTS.AUTO_INVESTIGATE('new');   -- note, report, containment request
+-- approve in Mission Control -> SHOW GRANTS TO USER XDR_DEMO_COMPROMISED shows no roles; Undo restores them
+```
+
 ## Splunk DB Connect Integration
 
 The schema uses Splunk CIM field names natively. To query from Splunk:
@@ -526,6 +631,8 @@ snowflake-xdr/
 ├── scripts/
 │   ├── deploy_demo.sh          # end-to-end builder (idempotent / --fresh)
 │   ├── deploy_otel_receiver.sh # build + deploy the OTLP receiver (SPCS)
+│   ├── load_rule_packs.sh      # load rule-packs/*/pack.yaml, coverage-aware install
+│   ├── gen_rule_packs.py       # generates the AWS/Entra/Okta/Databricks/Postgres/ClickHouse/Salesforce packs
 │   ├── otel_replay.py          # send demo attack stories as OTLP
 │   └── reset_demo_clock.sh     # move demo timestamps to "now"
 ├── setup/                      # SQL, run in order by the runner
@@ -539,7 +646,11 @@ snowflake-xdr/
 │   ├── 26, 27                  # Detection Autopilot, autopilot demo state
 │   ├── 28, 29                  # threat intel feeds, calibrated confidence + FP control
 │   ├── 30, 31                  # OpenTelemetry ingestion + CIM mappings, OTLP receiver (SPCS)
-│   └── 32, 33                  # case management (lifecycle, SLA, reports), Jira/ServiceNow ticket sync
+│   ├── 32, 33                  # case management (lifecycle, SLA, reports), Jira/ServiceNow ticket sync
+│   ├── 34, 35, 40              # rule packs + DATABASE_ACTIVITY, Snowflake telemetry lanes + Trust Center, pack OTel mappings
+│   ├── 36, 37                  # Mission Control (ledger, needs-you, kill switch, briefing), threat profile
+│   └── 38, 39                  # canaries + trust ladder, auto-investigation + approval-gated response
+├── rule-packs/<pack>/pack.yaml # detections + canary fixtures (non-Snowflake packs: scripts/gen_rule_packs.py)
 ├── data/ctf/                   # compressed CTF CSVs
 ├── otel-receiver/              # OTLP/HTTP receiver container + collector examples
 ├── xdr-console/                # XDR Console (Snowflake App Runtime, Next.js)

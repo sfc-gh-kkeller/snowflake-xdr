@@ -8,7 +8,7 @@ import { rows, one, scalar, str, oneOf, id, InputError, parseVariant, type Row }
 
 export const CHANGE_TYPES = [
   "new_rule", "fix_broken", "tune_filter", "tune_threshold", "disable_noisy", "retire_silent", "new_parser",
-  "auto_suppress", "suppress_entity", "intel_allowlist", "revoke_suppression", "recheck_verdicts",
+  "auto_suppress", "suppress_entity", "intel_allowlist", "revoke_suppression", "recheck_verdicts", "pack_rule",
 ] as const
 export const MODES = ["auto_live", "shadow_then_promote", "propose_only", "off"] as const
 const STATUSES = [

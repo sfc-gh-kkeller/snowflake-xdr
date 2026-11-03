@@ -13,10 +13,12 @@ export function Posture() {
   const trend = useXdr("posture.trend")
   const coverage = useXdr("detections.coverage")
   const responseHealth = useXdr("posture.responseHealth")
+  const verified = useXdr<Row>("posture.verified")
   const report = useXdrAction("posture.report")
 
   const m = metrics.data ?? {}
   const p = platform.data ?? {}
+  const v = verified.data ?? {}
   const covered = Number(m.tactics_covered) || 0
   const total = Number(m.total_tactics) || 0
   const coveragePct = total ? (covered / total) * 100 : 0
@@ -40,6 +42,11 @@ export function Posture() {
         <Kpi label="MITRE tactics covered" value={`${covered}/${total}`} hint={fmtPct(coveragePct)} tone={coveragePct >= 80 ? "good" : "warn"} />
         <Kpi label="Findings (7d)" value={fmtNum(m.findings_7d)} hint={`${fmtNum(m.critical_7d)} critical/high`} />
         <Kpi label="Response success" value={fmtPct(successPct)} hint={`${fmtNum(actions)} automated actions`} tone={successPct >= 90 ? "good" : "warn"} />
+        <Kpi label="Verified detections" value={`${fmtNum(v.verified)}/${fmtNum(v.tested)}`}
+          hint={`canary-proven · ${fmtNum(v.failing)} failing · ${fmtNum(v.verified_techniques)} techniques`}
+          tone={Number(v.failing) ? "danger" : Number(v.verified) ? "good" : "warn"} />
+        <Kpi label="Threat coverage" value={fmtPct(Number(v.threat_verified_pct) || 0)}
+          hint={`top threat techniques verified · ${fmtNum(v.threat_gaps)} gaps`} tone={Number(v.threat_gaps) ? "warn" : "good"} />
       </div>
 
       <AiTextPanel

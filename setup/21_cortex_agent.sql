@@ -41,7 +41,8 @@ instructions:
       run_autopilot_cycle, and for threat intel and false positives:
       threat_intel_status, confidence_status, decide_spot_check, for data
       sources: data_sources_status, and for cases and tickets: case_action,
-      ticketing_status. Things you genuinely cannot do: edit raw
+      ticketing_status, and for oversight: what_did_you_do, undo_action,
+      needs_human, request_response. Things you genuinely cannot do: edit raw
       telemetry, delete rules or data, change user access, or install a collector
       (say that plainly and give the next step instead).
     - After an action, report exactly what changed using the tool output: IDs,
@@ -100,6 +101,13 @@ instructions:
       report) -> case_action with the exact incident_id. create_ticket returns the ticket key and URL: report
       them. Once a ticket exists its workflow state is authoritative; say so if asked to change status.
       "Is the ticket in sync / which tickets failed" -> ticketing_status.
+    - "What did the AI / autopilot / you do", "what changed overnight", "is autonomy paused" -> what_did_you_do;
+      cite ledger_ids. "Undo / roll back that" -> undo_action with the exact ledger_id (only entries whose undo is set).
+    - "What needs me / what is waiting for a human / what should I approve" -> needs_human. You never approve
+      changes or response actions yourself: point the user to Mission Control (the home page).
+    - Containing a compromised Snowflake user -> request_response with action contain_snowflake_user. It only
+      queues the request; a human approves it in Mission Control. Only allowlisted users can be contained, and
+      containment removes roles (to PUBLIC) without disabling the user. Say so.
     - Recording a spot-check verdict -> decide_spot_check with the exact review_id. A true_positive
       verdict revokes the suppression and re-opens what it hid; say so.
   sample_questions:
@@ -395,6 +403,58 @@ tools:
         required: [p_incident_id, p_action, p_text]
   - tool_spec:
       type: "generic"
+      name: "what_did_you_do"
+      description: "Mission Control ledger: every change the AI and automation made (autopilot and rule-pack changes, agent actions, auto-suppressions, case and ticket updates, parsers, response actions) with reason, status and undo option, plus whether autonomy is paused and the change budget."
+      input_schema:
+        type: object
+        properties:
+          p_hours:
+            type: number
+            description: "Look-back window in hours (default 24, max 720)"
+        required: [p_hours]
+  - tool_spec:
+      type: "generic"
+      name: "undo_action"
+      description: "ACTION. Undo one ledger entry by its exact ledger_id from what_did_you_do (rollback an autopilot change, re-open auto-suppressed findings, retire a mapping, retry a ticket sync, or undo a response action)."
+      input_schema:
+        type: object
+        properties:
+          p_ledger_id:
+            type: string
+            description: "ledger_id, e.g. autopilot:<uuid> or response:<uuid>"
+          p_reason:
+            type: string
+            description: "Why it is being undone"
+        required: [p_ledger_id, p_reason]
+  - tool_spec:
+      type: "generic"
+      name: "needs_human"
+      description: "The ranked queue of items waiting on a human: change and parser approvals, autonomy promotions, spot checks, response approvals, SLA breaches, failed ticket syncs and failing detection canaries."
+      input_schema:
+        type: object
+        properties: {}
+  - tool_spec:
+      type: "generic"
+      name: "request_response"
+      description: "ACTION (request only). Ask for a response action on a case. contain_snowflake_user (strip an allowlisted Snowflake user's roles to PUBLIC) waits for human approval; recommendation-only actions (disable_snowflake_user, revoke_user_credentials) are recorded as advice."
+      input_schema:
+        type: object
+        properties:
+          p_action:
+            type: string
+            description: "contain_snowflake_user | disable_snowflake_user | revoke_user_credentials"
+          p_target:
+            type: string
+            description: "Snowflake user name"
+          p_incident_id:
+            type: string
+            description: "Exact incident_id, or empty"
+          p_reason:
+            type: string
+            description: "Evidence-based reason"
+        required: [p_action, p_target, p_incident_id, p_reason]
+  - tool_spec:
+      type: "generic"
       name: "ticketing_status"
       description: "Ticket integrations: connections (Jira, ServiceNow, demo tracker), linked tickets by sync status, pending/failed outbound updates, pending inbound changes."
       input_schema:
@@ -505,6 +565,22 @@ tool_resources:
     type: procedure
     identifier: "SNOWFLAKE_XDR.DASHBOARDS.AGENT_CASE_ACTION"
     execution_environment: {type: warehouse, warehouse: XDR_WH, query_timeout: 300}
+  what_did_you_do:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DASHBOARDS.AGENT_WHAT_DID_YOU_DO"
+    execution_environment: {type: warehouse, warehouse: XDR_WH}
+  undo_action:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DASHBOARDS.AGENT_UNDO_ACTION"
+    execution_environment: {type: warehouse, warehouse: XDR_WH, query_timeout: 300}
+  needs_human:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DASHBOARDS.AGENT_NEEDS_HUMAN"
+    execution_environment: {type: warehouse, warehouse: XDR_WH}
+  request_response:
+    type: procedure
+    identifier: "SNOWFLAKE_XDR.DASHBOARDS.AGENT_REQUEST_RESPONSE"
+    execution_environment: {type: warehouse, warehouse: XDR_WH}
   ticketing_status:
     type: procedure
     identifier: "SNOWFLAKE_XDR.INCIDENTS.TICKETING_STATUS"

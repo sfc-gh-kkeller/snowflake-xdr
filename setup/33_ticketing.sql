@@ -249,6 +249,10 @@ DECLARE
     v_new NUMBER;
     v_reopen NUMBER;
 BEGIN
+    -- the Mission Control kill switch stops automatic ticket creation (manual CREATE_TICKET still works)
+    IF (SNOWFLAKE_XDR.DETECTIONS.AUTONOMY_PAUSED()) THEN
+        RETURN OBJECT_CONSTRUCT('ok', TRUE, 'paused', TRUE, 'message', 'autonomy is paused: no automatic routing');
+    END IF;
     CREATE OR REPLACE TEMPORARY TABLE XDR_ROUTE AS
     SELECT i.incident_id, c.connection_id
     FROM SNOWFLAKE_XDR.INCIDENTS.INCIDENTS i

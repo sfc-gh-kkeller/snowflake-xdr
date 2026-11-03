@@ -126,6 +126,9 @@ CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.REFERENCE.AUTOPILOT_TECHNIQUE_BACKLOG (
     hint           VARCHAR(1000),
     priority       NUMBER DEFAULT 3
 );
+-- Threat-informed ranking (filled by setup/37_threat_profile.sql; NULL = rank by curated priority)
+ALTER TABLE SNOWFLAKE_XDR.REFERENCE.AUTOPILOT_TECHNIQUE_BACKLOG ADD COLUMN IF NOT EXISTS threat_score FLOAT;
+ALTER TABLE SNOWFLAKE_XDR.REFERENCE.AUTOPILOT_TECHNIQUE_BACKLOG ADD COLUMN IF NOT EXISTS rank_reason VARCHAR(1000);
 
 MERGE INTO SNOWFLAKE_XDR.REFERENCE.AUTOPILOT_TECHNIQUE_BACKLOG t
 USING (
@@ -175,7 +178,8 @@ USING (
     ('tune_threshold', 'auto_live',           3, 0,  0.0, 0,  'Raise the threshold of a noisy custom rule'),
     ('disable_noisy',  'propose_only',        3, 0,  0.0, 0,  'Disable a rule whose findings are almost all false positives'),
     ('retire_silent',  'propose_only',        3, 0,  0.0, 0,  'Disable a custom rule that has produced nothing for 30 days'),
-    ('new_parser',     'propose_only',        2, 24, 0.0, 0,  'Map a new log source into the CIM tables (OTel phase)')
+    ('new_parser',     'propose_only',        2, 24, 0.0, 0,  'Map a new log source into the CIM tables (OTel phase)'),
+    ('pack_rule',      'shadow_then_promote', 25, 24, 0.0, 25, 'Install or update a vetted best-practice rule from a rule pack')
     AS v(change_type, mode, max_per_cycle, promote_after_hours, min_recall, max_benign_matches, description)
 ) s ON t.change_type = s.change_type
 WHEN NOT MATCHED THEN INSERT (change_type, mode, max_per_cycle, promote_after_hours, min_recall,
@@ -201,6 +205,36 @@ USING (
     UNION ALL SELECT 'console_url', TO_VARIANT('')
 ) s ON t.setting = s.k
 WHEN NOT MATCHED THEN INSERT (setting, value) VALUES (s.k, s.v);
+
+-- Global guardrails (Mission Control, setup/36_oversight.sql).
+--   paused              kill switch: stops the autopilot, auto-suppression, pack installs,
+--                       ticket routing and automatic response
+--   daily_change_budget max autopilot changes recorded per day, all types together
+-- Per-type budgets live in AUTOPILOT_POLICY.daily_budget (NULL = no per-type cap).
+CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.DETECTIONS.AUTONOMY_SETTINGS (
+    setting     VARCHAR(50) PRIMARY KEY,
+    value       VARIANT,
+    updated_by  VARCHAR(255),
+    updated_at  TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+MERGE INTO SNOWFLAKE_XDR.DETECTIONS.AUTONOMY_SETTINGS t
+USING (
+    SELECT 'paused' k, TO_VARIANT(FALSE) v
+    UNION ALL SELECT 'paused_reason', TO_VARIANT('')
+    UNION ALL SELECT 'daily_change_budget', TO_VARIANT(60)
+) s ON t.setting = s.k
+WHEN NOT MATCHED THEN INSERT (setting, value, updated_by) VALUES (s.k, s.v, 'default');
+
+ALTER TABLE SNOWFLAKE_XDR.DETECTIONS.AUTOPILOT_POLICY ADD COLUMN IF NOT EXISTS daily_budget NUMBER;
+
+CREATE OR REPLACE FUNCTION SNOWFLAKE_XDR.DETECTIONS.AUTONOMY_PAUSED()
+RETURNS BOOLEAN
+AS
+$$
+    COALESCE((SELECT MAX(TRY_TO_BOOLEAN(value::VARCHAR)) FROM SNOWFLAKE_XDR.DETECTIONS.AUTONOMY_SETTINGS
+              WHERE setting = 'paused'), FALSE)
+$$;
 
 CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.DETECTIONS.AUTOPILOT_CHANGES (
     change_id       VARCHAR DEFAULT UUID_STRING() PRIMARY KEY,
@@ -250,7 +284,8 @@ NETWORK_TRAFFIC: src, src_ip, src_port, dest, dest_ip, dest_port, transport, pro
 INTRUSION_DETECTION: src, src_ip, dest, dest_ip, dest_port, signature, signature_id, severity, category.
 DNS_ACTIVITY: src, dest, query, query_type, answer, reply_code, query_length, answer_count, ttl.
 WEB_ACTIVITY: src, dest, url, uri_path, uri_query, http_method, status, http_user_agent, http_referrer, bytes_in, bytes_out, category, threat_category.
-CLOUD_API: command, user_name, user_type, src, dest, object, object_category, result, reason, app, vendor_account, vendor_region.'
+CLOUD_API: command, user_name, user_type, src, dest, object, object_category, result, reason, app, vendor_account, vendor_region.
+DATABASE_ACTIVITY (Snowflake, Databricks, Postgres, ClickHouse, Salesforce audit): user_name, user_role, src, dest (account/instance), app (client), query_type, query_text, object, object_category, result, reason, rows_affected, bytes, warehouse, session_id.'
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -444,6 +479,8 @@ def passes(metrics, pol, baseline=None):
         return True, (f"no recall loss; FP-entity matches {baseline.get('fp_overlap', 0)} -> {metrics['fp_overlap']}, "
                       f"benign {baseline.get('benign', 0)} -> {metrics['benign']}")
     if metrics["recall"] is None:
+        if metrics["matches"] == 0 and pol.get("CHANGE_TYPE") == "pack_rule":
+            return True, "vetted pack rule: runs cleanly, no matches in the 7-day backtest"
         if metrics["matches"] == 0:
             return False, "no ground truth for this technique and no matches yet - waiting for evidence"
         if metrics["benign"] > (pol.get("MAX_BENIGN_MATCHES") or 0):
@@ -622,9 +659,12 @@ def set_rule_enabled(s, rule_id, enabled):
 
 def go_live(s, change):
     ct = change["CHANGE_TYPE"]
-    if ct == "new_rule":
+    if ct in ("new_rule", "pack_rule"):
         s.sql(f"UPDATE {CR} SET enabled = TRUE, test_mode = FALSE, updated_at = CURRENT_TIMESTAMP() WHERE rule_id = ?",
               params=[change["RULE_ID"]]).collect()
+        if ct == "pack_rule":
+            s.sql(f"UPDATE {DB}.REFERENCE.RULE_PACK_RULES SET install_state = 'live' WHERE rule_id = ?",
+                  params=[change["RULE_ID"]]).collect()
         return "rule enabled"
     if ct in ("fix_broken", "tune_filter"):
         return apply_candidate(s, change)
@@ -678,15 +718,24 @@ def go_live(s, change):
                   params=[change["TARGET_RULE_ID"], ev["entity"]]).collect()[0][0]
         s.sql(f"CALL {DB}.DETECTIONS.TRAIN_FP_MODEL()").collect()
         return f"re-opened {n} finding(s) for re-check; FP model retrained"
+    if ct == "autonomy_promotion":
+        ev = evidence_of(change)
+        s.sql(f"""UPDATE {DB}.DETECTIONS.AUTOPILOT_POLICY SET mode = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP()
+                  WHERE change_type = ?""", params=[ev["to"], change.get("DECIDED_BY") or "trust ladder",
+                                                ev["target_type"]]).collect()
+        return f"{ev['target_type']} now runs as {ev['to']}"
     return "nothing to apply"
 
 
 def revert(s, change):
     ct = change["CHANGE_TYPE"]
     ev = evidence_of(change)
-    if ct == "new_rule":
+    if ct == "new_rule" or (ct == "pack_rule" and not ev.get("update")):
         s.sql(f"UPDATE {CR} SET enabled = FALSE, test_mode = FALSE WHERE rule_id = ?",
               params=[change["RULE_ID"]]).collect()
+        if ct == "pack_rule":
+            s.sql(f"UPDATE {DB}.REFERENCE.RULE_PACK_RULES SET install_state = 'rolled_back' WHERE rule_id = ?",
+                  params=[change["RULE_ID"]]).collect()
         return "rule disabled"
     before = ev.get("before") or {}
     target = change["TARGET_RULE_ID"]
@@ -706,6 +755,10 @@ def revert(s, change):
         return "indicator restored"
     if ct == "recheck_verdicts":
         return "re-check cannot be rolled back; record new verdicts in Triage"
+    if ct in ("autonomy_promotion", "autonomy_demotion"):
+        s.sql(f"""UPDATE {DB}.DETECTIONS.AUTOPILOT_POLICY SET mode = ?, updated_by = 'rollback', updated_at = CURRENT_TIMESTAMP()
+                  WHERE change_type = ?""", params=[ev["from"], ev["target_type"]]).collect()
+        return f"{ev['target_type']} back to {ev['from']}"
     if ct == "new_parser":
         r = one(s, f"CALL {DB}.REFERENCE.RETIRE_CIM_MAPPING(?, TRUE)", [ev["mapping_id"]])
         return json.loads(list(r.values())[0]).get("message", "mapping retired")
@@ -719,6 +772,29 @@ def revert(s, change):
 
 
 # ---------------------------------------------------------------- cycle
+# ---------------------------------------------------------------- guardrails
+class Budget:
+    """Daily change budget: in total (AUTONOMY_SETTINGS.daily_change_budget) and per type (policy.daily_budget)."""
+
+    def __init__(self, s):
+        r = one(s, f"SELECT value::NUMBER AS b FROM {DB}.DETECTIONS.AUTONOMY_SETTINGS WHERE setting = 'daily_change_budget'")
+        self.total = int(r["B"]) if r and r["B"] is not None else None
+        self.counts = {x["CHANGE_TYPE"]: int(x["N"]) for x in rows(s, f"""
+            SELECT change_type, COUNT(*) AS n FROM {CH}
+            WHERE created_at >= DATEADD('hour', -24, CURRENT_TIMESTAMP()) GROUP BY 1""")}
+
+    def exceeded(self, change_type, pol):
+        if self.total is not None and sum(self.counts.values()) >= self.total:
+            return f"daily change budget of {self.total} reached"
+        cap_t = (pol.get(change_type) or {}).get("DAILY_BUDGET")
+        if cap_t is not None and self.counts.get(change_type, 0) >= int(cap_t):
+            return f"daily budget of {int(cap_t)} for {change_type} reached"
+        return None
+
+    def used(self, change_type):
+        self.counts[change_type] = self.counts.get(change_type, 0) + 1
+
+
 def open_targets(s):
     r = rows(s, f"""SELECT target_rule_id, technique_id, change_type FROM {CH}
                    WHERE status IN ('proposed', 'shadow')
@@ -746,11 +822,16 @@ def decide_mode(change_type, pol, severity=None, target=None):
 def cycle(s):
     cfg, pol = settings(s), policy(s)
     summary = {"promoted": [], "rolled_back": [], "created": [], "skipped": [], "failed": []}
+    if one(s, f"SELECT {DB}.DETECTIONS.AUTONOMY_PAUSED() AS p")["P"]:
+        reason = one(s, f"""SELECT value::VARCHAR AS r FROM {DB}.DETECTIONS.AUTONOMY_SETTINGS
+                            WHERE setting = 'paused_reason'""")
+        return {"paused": True, "message": "autonomy is paused (kill switch): " + ((reason or {}).get("R") or "no reason given")}
+    budget = Budget(s)
 
     # 1. Guardrails on recent live changes: errors or floods roll back automatically
     for ch in rows(s, f"""SELECT * FROM {CH} WHERE status IN ('applied', 'promoted', 'approved')
                           AND updated_at > DATEADD('day', -7, CURRENT_TIMESTAMP())"""):
-        rid = ch["TARGET_RULE_ID"] if ch["CHANGE_TYPE"] != "new_rule" else ch["RULE_ID"]
+        rid = ch["TARGET_RULE_ID"] if ch["CHANGE_TYPE"] not in ("new_rule", "pack_rule") else ch["RULE_ID"]
         if not rid or ch["CHANGE_TYPE"] in ("disable_noisy", "retire_silent"):
             continue
         errs = one(s, f"""SELECT COUNT(*) AS n, MAX(LEFT(error_message, 200)) AS e
@@ -809,10 +890,14 @@ def cycle(s):
     def handle(change_type, title, rationale, rid=None, target=None, technique=None, severity=None,
                evidence=None, ok=True, reason=""):
         mode = decide_mode(change_type, pol, severity, target)
-        if mode == "off":
+        over = budget.exceeded(change_type, pol) if mode != "off" else None
+        if mode == "off" or over:
             if rid:
                 drop_candidate(s, rid) if target else s.sql(f"DELETE FROM {CR} WHERE rule_id = ?", params=[rid]).collect()
+            if over:
+                summary["skipped"].append(f"{change_type}: {title[:80]} ({over})")
             return
+        budget.used(change_type)
         status = "proposed"
         if mode == "shadow_then_promote" and rid:
             s.sql(f"UPDATE {CR} SET test_mode = TRUE WHERE rule_id = ?", params=[rid]).collect()
@@ -837,7 +922,7 @@ def cycle(s):
                               WHERE r.enabled AND r.mitre_technique_id = b.technique_id)
               AND NOT EXISTS (SELECT 1 FROM {CR} c
                               WHERE (c.enabled OR c.test_mode) AND c.mitre_technique_id = b.technique_id)
-            ORDER BY b.priority, b.technique_id""")
+            ORDER BY b.threat_score DESC NULLS LAST, b.priority, b.technique_id""")
         made = 0
         for g in gaps:
             if made >= cap(p):
@@ -855,10 +940,13 @@ def cycle(s):
                 summary["failed"].append(g["TECHNIQUE_ID"])
                 continue
             ok, reason = passes(metrics, p)
-            handle("new_rule", f"New rule: {j.get('name')} ({g['TECHNIQUE_ID']})", j.get("rationale"),
+            why_ranked = g.get("RANK_REASON")
+            handle("new_rule", f"New rule: {j.get('name')} ({g['TECHNIQUE_ID']})",
+                   (j.get("rationale") or "") + (f" Why this technique now: {why_ranked}." if why_ranked else ""),
                    rid=rid, technique=g["TECHNIQUE_ID"], severity=to_int(j.get("severity"), 3, 1, 5),
                    evidence={"metrics": metrics, "gate": {"ok": ok, "reason": reason}, "attempts": hist,
-                             "sql": rule(s, rid)["CODE"]}, ok=ok, reason=reason)
+                             "sql": rule(s, rid)["CODE"], "why_ranked": why_ranked,
+                             "threat_score": g.get("THREAT_SCORE")}, ok=ok, reason=reason)
             made += 1
 
     # 4. fix_broken: custom rules erroring in the last 24h
@@ -996,6 +1084,15 @@ def cycle(s):
             new_parsers(s, cfg, pp, handle, summary)
         except Exception as e:  # OTel ingestion not deployed yet
             summary.setdefault("skipped", []).append("new_parser: " + str(e)[:120])
+
+    # 10. pack_rule: install vetted pack rules whose data source now has data (coverage-aware)
+    if (pol.get("pack_rule") or {}).get("MODE") != "off":
+        try:
+            r = json.loads(list(one(s, f"CALL {DB}.REFERENCE.INSTALL_RULE_PACK('all', FALSE)").values())[0])
+            for x in r.get("installed", []):
+                summary["created"].append({"type": "pack_rule", "title": x["title"], "status": x["status"]})
+        except Exception as e:  # rule packs not deployed yet
+            summary.setdefault("skipped", []).append("pack_rule: " + str(e)[:120])
 
     notify(s, summary)
     return summary
@@ -1322,7 +1419,12 @@ def decide(s, change_id, action, note):
                   params=[evidence_of(ch).get("mapping_id")]).collect()
             s.sql(f"UPDATE {DB}.REFERENCE.OTEL_SOURCES SET status = 'unmapped' WHERE source_id = ?",
                   params=[evidence_of(ch).get("source_id")]).collect()
-        if ch["RULE_ID"]:
+        if ct == "pack_rule":
+            s.sql(f"UPDATE {CR} SET enabled = FALSE, test_mode = FALSE WHERE rule_id = ?", params=[ch["RULE_ID"]]).collect()
+            s.sql(f"DELETE FROM {DB}.DETECTIONS.SHADOW_FINDINGS WHERE rule_id = ?", params=[ch["RULE_ID"]]).collect()
+            s.sql(f"UPDATE {DB}.REFERENCE.RULE_PACK_RULES SET install_state = 'rejected' WHERE rule_id = ?",
+                  params=[ch["RULE_ID"]]).collect()
+        elif ch["RULE_ID"]:
             if ct == "new_rule":
                 s.sql(f"DELETE FROM {DB}.DETECTIONS.SHADOW_FINDINGS WHERE rule_id = ?", params=[ch["RULE_ID"]]).collect()
                 s.sql(f"DELETE FROM {CR} WHERE rule_id = ? AND managed_by = 'autopilot' AND NOT enabled",
