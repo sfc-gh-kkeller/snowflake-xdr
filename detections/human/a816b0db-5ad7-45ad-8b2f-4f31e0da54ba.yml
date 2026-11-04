@@ -1,0 +1,25 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: a816b0db-5ad7-45ad-8b2f-4f31e0da54ba
+name: Domain discovery command burst
+description: Three or more distinct account/domain discovery commands (net user/group, nltest, whoami, systeminfo, ...) by
+  one user on one host within an hour - typical of post-compromise recon scripts.
+severity: 4
+tactic: TA0007
+technique: T1087.002
+threshold: 1
+window_minutes: 60
+lookback_minutes: 10080
+enabled: true
+shadow: false
+pinned: false
+version: 1
+managed_by: human
+created_by: demo_seed
+sql: |
+  SELECT MAX(_time) AS _time, user_name, NULL AS src, dest,
+         'Discovery burst: ' || COUNT(DISTINCT process) || ' recon commands by ' || COALESCE(user_name, 'unknown') || ' on ' || dest AS description
+  FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES
+  WHERE REGEXP_LIKE(LOWER(process), '.*(net( |\\.exe )(user|group|localgroup)|nltest|whoami|quser|systeminfo|ipconfig /all|arp -a).*')
+  GROUP BY user_name, dest, DATE_TRUNC('hour', _time)
+  HAVING COUNT(DISTINCT process) >= 3

@@ -1,0 +1,82 @@
+# Detection-as-code CI (setup/42_detection_as_code.sql, scripts/export_rules.py)
+#   pull request: unit tests + lint/compile/canary-verify every changed detection in Snowflake
+#   push to main: apply changed detections/*.yml (history snapshot first; pack and pinned rules untouched)
+# Snowflake checks need repo secrets SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PRIVATE_KEY (PEM, key-pair
+# auth for a CI user/role with the XDR objects); without them those steps are skipped, unit tests still run.
+name: detections
+
+on:
+  pull_request:
+    paths: ["detections/**", "rule-packs/**", "sigma/**", "setup/**", "xdr-console/**"]
+  push:
+    branches: [main]
+    paths: ["detections/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install pyyaml pytest
+      - name: Sigma compiler unit tests
+        run: python -m pytest -q sigma
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Console tests
+        working-directory: xdr-console
+        run: npm ci && npx vitest run
+
+  verify:
+    if: github.event_name == 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      SNOWFLAKE_CI: "1"
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
+      SNOWFLAKE_PRIVATE_KEY_RAW: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+      SNOWFLAKE_WAREHOUSE: XDR_WH
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install pyyaml snowflake-cli
+      - name: Changed detections
+        id: changed
+        run: |
+          files=$(git diff --name-only --diff-filter=AM origin/${{ github.base_ref }}...HEAD \
+                  -- 'detections/**/*.yml' 'rule-packs/*/pack.yaml' | tr '\n' ' ')
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+      - name: Lint, compile and canary-verify in Snowflake
+        if: steps.changed.outputs.files != '' && env.SNOWFLAKE_ACCOUNT != ''
+        run: python scripts/export_rules.py verify ${{ steps.changed.outputs.files }}
+
+  apply:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      SNOWFLAKE_CI: "1"
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
+      SNOWFLAKE_PRIVATE_KEY_RAW: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+      SNOWFLAKE_WAREHOUSE: XDR_WH
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install pyyaml snowflake-cli
+      - name: Apply changed detections
+        if: env.SNOWFLAKE_ACCOUNT != ''
+        run: |
+          files=$(git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'detections/**/*.yml' | tr '\n' ' ')
+          [ -n "$files" ] && python scripts/export_rules.py apply $files || echo "no detection changes"

@@ -1,0 +1,23 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: f2dddb1e-450c-46a5-88f1-cd9aa6df64eb
+name: Credential theft tool execution
+description: Known credential-dumping or remote-execution tools (Mimikatz, PsExec, ProcDump, Rubeus, LaZagne, secretsdump)
+  launched on an endpoint.
+severity: 5
+tactic: TA0006
+technique: T1003
+threshold: 1
+window_minutes: 60
+lookback_minutes: 10080
+enabled: true
+shadow: false
+pinned: false
+version: 1
+managed_by: human
+created_by: demo_seed
+sql: |
+  SELECT _time, user_name, NULL AS src, dest,
+         'Credential/lateral tool executed: ' || process_name || ' on ' || dest || ' by ' || COALESCE(user_name, 'unknown') AS description
+  FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES
+  WHERE LOWER(process_name) IN ('mimikatz.exe', 'psexec.exe', 'procdump.exe', 'rubeus.exe', 'lazagne.exe', 'secretsdump.exe')

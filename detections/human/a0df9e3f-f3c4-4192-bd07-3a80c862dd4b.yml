@@ -1,0 +1,25 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: a0df9e3f-f3c4-4192-bd07-3a80c862dd4b
+name: DNS exfiltration - long query volume (draft)
+description: 'Ten or more unusually long DNS queries (>50 chars) from one source within an hour - possible DNS tunnelling
+  or exfiltration. Draft: tune the length threshold before enabling.'
+severity: 4
+tactic: TA0010
+technique: T1048.003
+threshold: 1
+window_minutes: 60
+lookback_minutes: 10080
+enabled: false
+shadow: false
+pinned: false
+version: 3
+managed_by: human
+created_by: demo_seed
+sql: |
+  SELECT MAX(_time) AS _time, NULL AS user_name, src, NULL AS dest,
+         'Possible DNS exfiltration: ' || COUNT(*) || ' long queries from ' || src AS description
+  FROM SNOWFLAKE_XDR.RAW_LOGS.DNS_ACTIVITY
+  WHERE query_length > 50
+  GROUP BY src, DATE_TRUNC('hour', _time)
+  HAVING COUNT(*) >= 10

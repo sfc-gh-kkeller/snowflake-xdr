@@ -1,0 +1,41 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: 285488c1-ae9b-4923-9282-93384f8d551a
+name: Registry Modification Pointing to Executable in User-Writable Path
+description: Detects registry modifications where the value data points to executables located in temporary or user-writable
+  directories, indicating potential persistence or defense evasion.
+severity: 4
+tactic: TA0005
+technique: T1112
+threshold: 1
+window_minutes: 60
+lookback_minutes: 1440
+enabled: true
+shadow: false
+pinned: false
+version: 1
+managed_by: autopilot
+created_by: autopilot
+sql: "WITH registry_modifications AS (\n  SELECT\n    _time,\n    dest,\n    user_name,\n    registry_path,\n    registry_key_name,\n\
+  \    registry_value_name,\n    registry_value_data,\n    process_name\n  FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_REGISTRY\n\
+  \  WHERE registry_value_data IS NOT NULL\n    AND (\n      LOWER(registry_value_data) LIKE '%.exe%'\n      OR LOWER(registry_value_data)\
+  \ LIKE '%.dll%'\n      OR LOWER(registry_value_data) LIKE '%.bat%'\n      OR LOWER(registry_value_data) LIKE '%.cmd%'\n\
+  \      OR LOWER(registry_value_data) LIKE '%.ps1%'\n      OR LOWER(registry_value_data) LIKE '%.vbs%'\n      OR LOWER(registry_value_data)\
+  \ LIKE '%.js%'\n    )\n    AND (\n      LOWER(registry_value_data) LIKE '%\\\\temp\\\\%'\n      OR LOWER(registry_value_data)\
+  \ LIKE '%\\\\appdata\\\\%'\n      OR LOWER(registry_value_data) LIKE '%\\\\users\\\\public\\\\%'\n      OR LOWER(registry_value_data)\
+  \ LIKE '%\\\\programdata\\\\%'\n      OR LOWER(registry_value_data) LIKE '%\\\\windows\\\\temp\\\\%'\n    )\n),\noutlook_persistence\
+  \ AS (\n  SELECT\n    _time,\n    dest,\n    user_name,\n    registry_path,\n    registry_value_name,\n    registry_value_data,\n\
+  \    process_name,\n    'Potential Outlook Home Page Persistence' AS detection_type\n  FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_REGISTRY\n\
+  \  WHERE LOWER(registry_path) LIKE '%\\\\software\\\\microsoft\\\\office\\\\%'\n    AND LOWER(registry_path) LIKE '%\\\\\
+  outlook\\\\webview\\\\%'\n    AND LOWER(registry_value_name) = 'url'\n),\nrestricted_admin_tampering AS (\n  SELECT\n  \
+  \  _time,\n    dest,\n    user_name,\n    registry_path,\n    registry_value_name,\n    registry_value_data,\n    process_name,\n\
+  \    'RestrictedAdminMode Tampering' AS detection_type\n  FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_REGISTRY\n  WHERE LOWER(registry_path)\
+  \ LIKE '%\\\\system\\\\currentcontrolset\\\\control\\\\lsa\\\\disablerestrictedadmin%'\n),\ncombined_detections AS (\n \
+  \ SELECT\n    _time,\n    user_name,\n    NULL AS src,\n    dest,\n    'Registry value pointing to executable in user-writable\
+  \ path: ' || \n    COALESCE(registry_key_name, registry_path) || ' = ' || \n    LEFT(registry_value_data, 200) AS description\n\
+  \  FROM registry_modifications\n  \n  UNION ALL\n  \n  SELECT\n    _time,\n    user_name,\n    NULL AS src,\n    dest,\n\
+  \    detection_type || ': ' || registry_path || ' = ' || \n    COALESCE(LEFT(registry_value_data, 200), 'N/A') AS description\n\
+  \  FROM outlook_persistence\n  \n  UNION ALL\n  \n  SELECT\n    _time,\n    user_name,\n    NULL AS src,\n    dest,\n  \
+  \  detection_type || ': ' || registry_path || ' = ' || \n    COALESCE(registry_value_data, 'N/A') AS description\n  FROM\
+  \ restricted_admin_tampering\n)\nSELECT\n  _time,\n  user_name,\n  src,\n  dest,\n  description\nFROM combined_detections\n\
+  ORDER BY _time DESC\n"

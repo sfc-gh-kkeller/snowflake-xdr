@@ -1,0 +1,70 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: 6d8d7843-5567-4e50-9f3f-494a68588f1f
+name: T1486 Data Encrypted for Impact - BitLocker Registry Manipulation or Renamed GPG Execution
+description: Detects suspicious BitLocker policy registry modifications or execution of renamed GPG encryption binaries consistent
+  with ransomware preparation.
+severity: 4
+tactic: TA0040
+technique: T1486
+threshold: 1
+window_minutes: 60
+lookback_minutes: 1440
+enabled: false
+shadow: true
+pinned: false
+version: 1
+managed_by: autopilot
+created_by: autopilot
+sql: |
+  WITH bitlocker_reg_manipulation AS (
+    SELECT
+      _time,
+      dest,
+      user_name,
+      process,
+      process_name
+    FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES
+    WHERE UPPER(process) LIKE '%REG%'
+      AND UPPER(process) LIKE '%ADD%'
+      AND UPPER(process) LIKE '%\\SOFTWARE\\POLICIES\\MICROSOFT\\FVE%'
+      AND UPPER(process) LIKE '%/V%'
+      AND UPPER(process) LIKE '%/F%'
+      AND (
+        UPPER(process) LIKE '%ENABLEBDEWITHNОТРМ%'
+        OR UPPER(process) LIKE '%USEADVANCEDSTARTUP%'
+        OR UPPER(process) LIKE '%USETPM%'
+        OR UPPER(process) LIKE '%USETPMKEY%'
+        OR UPPER(process) LIKE '%USETPMKEYPIN%'
+        OR UPPER(process) LIKE '%RECOVERYKEYMESSAGESOURCE%'
+        OR UPPER(process) LIKE '%USETPMPIN%'
+        OR UPPER(process) LIKE '%RECOVERYKEYMESSAGE%'
+      )
+  ),
+  renamed_gpg AS (
+    SELECT
+      _time,
+      dest,
+      user_name,
+      process,
+      process_path,
+      original_file_name
+    FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES
+    WHERE UPPER(COALESCE(original_file_name, '')) = 'GPG.EXE'
+      AND NOT (UPPER(COALESCE(process_path, '')) LIKE '%\\GPG.EXE' OR UPPER(COALESCE(process_path, '')) LIKE '%\\GPG2.EXE')
+  )
+  SELECT
+    _time,
+    user_name,
+    NULL AS src,
+    dest,
+    CASE
+      WHEN process LIKE '%REG%ADD%' THEN 'Suspicious BitLocker policy registry modification detected via REG ADD command: ' || COALESCE(process_name, 'unknown')
+      ELSE 'Renamed GPG.EXE execution detected (original: ' || COALESCE(original_file_name, 'gpg.exe') || ', actual path: ' || COALESCE(process_path, 'unknown') || ')'
+    END AS description
+  FROM (
+    SELECT _time, dest, user_name, process, process_name, NULL AS process_path, NULL AS original_file_name FROM bitlocker_reg_manipulation
+    UNION ALL
+    SELECT _time, dest, user_name, process, NULL AS process_name, process_path, original_file_name FROM renamed_gpg
+  )
+  ORDER BY _time DESC

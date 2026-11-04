@@ -1,0 +1,45 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: e73e98cc-86a6-4d5b-a8c8-dd75b8ef4835
+name: Exfiltration to Cloud Storage via Rclone or Dropbox API
+description: Detects rclone execution with cloud sync parameters or non-Dropbox processes connecting to Dropbox API endpoints
+  indicating potential data exfiltration to cloud storage services.
+severity: 4
+tactic: TA0010
+technique: T1567.002
+threshold: 1
+window_minutes: 60
+lookback_minutes: 1440
+enabled: false
+shadow: true
+pinned: false
+version: 1
+managed_by: autopilot
+created_by: autopilot
+sql: "WITH rclone_processes AS (\n  SELECT \n    _time,\n    dest,\n    user_name,\n    process,\n    process_path,\n    LOWER(process)\
+  \ AS process_lower,\n    LOWER(COALESCE(process_path, '')) AS path_lower\n  FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES\n\
+  \  WHERE \n    (\n      process_lower LIKE '%rclone%'\n      OR path_lower LIKE '%rclone.exe'\n    )\n    AND (\n      (process_lower\
+  \ LIKE '%--config%' AND process_lower LIKE '%--no-check-certificate%' AND process_lower LIKE '%copy%')\n      OR (\n   \
+  \     (path_lower LIKE '%rclone.exe' OR process_lower LIKE '%description%rsync for cloud storage%')\n        AND (\n   \
+  \       process_lower LIKE '%pass%' OR process_lower LIKE '%user%' OR process_lower LIKE '%copy%'\n          OR process_lower\
+  \ LIKE '%sync%' OR process_lower LIKE '%config%' OR process_lower LIKE '%lsd%'\n          OR process_lower LIKE '%remote%'\
+  \ OR process_lower LIKE '%mega%' OR process_lower LIKE '%pcloud%'\n          OR process_lower LIKE '%ftp%' OR process_lower\
+  \ LIKE '%ignore-existing%' OR process_lower LIKE '%auto-confirm%'\n          OR process_lower LIKE '%transfers%' OR process_lower\
+  \ LIKE '%multi-thread-streams%'\n          OR process_lower LIKE '%no-check-certificate%'\n        )\n      )\n    )\n),\n\
+  dropbox_api_traffic AS (\n  SELECT \n    nt._time,\n    nt.src AS dest,\n    NULL AS user_name,\n    nt.dest AS api_endpoint,\n\
+  \    nt.dest_ip\n  FROM SNOWFLAKE_XDR.RAW_LOGS.NETWORK_TRAFFIC nt\n  WHERE \n    LOWER(nt.dest) LIKE '%api.dropboxapi.com'\n\
+  \    OR LOWER(nt.dest) LIKE '%content.dropboxapi.com'\n),\ndropbox_dns AS (\n  SELECT \n    dns._time,\n    dns.src AS dest,\n\
+  \    NULL AS user_name,\n    dns.query AS api_endpoint\n  FROM SNOWFLAKE_XDR.RAW_LOGS.DNS_ACTIVITY dns\n  WHERE \n    LOWER(dns.query)\
+  \ LIKE '%api.dropboxapi.com'\n    OR LOWER(dns.query) LIKE '%content.dropboxapi.com'\n),\ndropbox_combined AS (\n  SELECT\
+  \ \n    d._time,\n    d.dest,\n    d.user_name,\n    d.api_endpoint\n  FROM dropbox_api_traffic d\n  WHERE NOT EXISTS (\n\
+  \    SELECT 1 \n    FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES ep\n    WHERE ep.dest = d.dest\n      AND LOWER(COALESCE(ep.process_path,\
+  \ '')) LIKE '%dropbox%'\n      AND ep._time BETWEEN DATEADD(minute, -10, d._time) AND d._time\n  )\n  UNION ALL\n  SELECT\
+  \ \n    dns._time,\n    dns.dest,\n    dns.user_name,\n    dns.api_endpoint\n  FROM dropbox_dns dns\n  WHERE NOT EXISTS\
+  \ (\n    SELECT 1 \n    FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES ep\n    WHERE ep.dest = dns.dest\n      AND LOWER(COALESCE(ep.process_path,\
+  \ '')) LIKE '%dropbox%'\n      AND ep._time BETWEEN DATEADD(minute, -10, dns._time) AND dns._time\n  )\n),\nanonfiles_dns\
+  \ AS (\n  SELECT \n    _time,\n    src AS dest,\n    NULL AS user_name,\n    query\n  FROM SNOWFLAKE_XDR.RAW_LOGS.DNS_ACTIVITY\n\
+  \  WHERE LOWER(query) LIKE '%anonfiles.com%'\n)\nSELECT \n  _time,\n  user_name,\n  dest AS src,\n  NULL AS dest,\n  'Rclone\
+  \ execution detected with cloud storage parameters: ' || SUBSTRING(process, 1, 200) AS description\nFROM rclone_processes\n\
+  UNION ALL\nSELECT \n  _time,\n  user_name,\n  dest AS src,\n  api_endpoint AS dest,\n  'Non-Dropbox process connecting to\
+  \ Dropbox API endpoint' AS description\nFROM dropbox_combined\nUNION ALL\nSELECT \n  _time,\n  user_name,\n  dest AS src,\n\
+  \  query AS dest,\n  'DNS query for Anonfiles.com domain detected' AS description\nFROM anonfiles_dns\n"

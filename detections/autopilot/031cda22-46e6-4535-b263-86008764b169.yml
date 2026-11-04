@@ -1,0 +1,73 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: 031cda22-46e6-4535-b263-86008764b169
+name: T1489 Service Stop via Scheduled Task Deletion
+description: Detects attempts to delete critical scheduled tasks or all tasks using schtasks.exe, commonly used by adversaries
+  to disable security services and backups.
+severity: 4
+tactic: TA0040
+technique: T1489
+threshold: 1
+window_minutes: 60
+lookback_minutes: 1440
+enabled: false
+shadow: true
+pinned: false
+version: 1
+managed_by: autopilot
+created_by: autopilot
+sql: |
+  WITH task_deletion AS (
+    SELECT
+      _time,
+      dest,
+      user_name,
+      process,
+      process_path,
+      COALESCE(original_file_name, '') AS original_file_name,
+      CASE
+        WHEN process ILIKE '% /delete %' AND process ILIKE '%/tn%*%' AND process ILIKE '% /f%' THEN 'Delete All Scheduled Tasks'
+        WHEN process ILIKE '% /delete %' AND (
+          process ILIKE '%\\Windows\\BitLocker%' OR
+          process ILIKE '%\\Windows\\ExploitGuard%' OR
+          process ILIKE '%\\Windows\\SystemRestore\\SR%' OR
+          process ILIKE '%\\Windows\\UpdateOrchestrator\\%' OR
+          process ILIKE '%\\Windows\\Windows Defender\\%' OR
+          process ILIKE '%\\Windows\\WindowsBackup\\%' OR
+          process ILIKE '%\\Windows\\WindowsUpdate\\%'
+        ) THEN 'Delete Critical Scheduled Task'
+        WHEN process ILIKE '% /change %' AND process ILIKE '% /disable%' AND (
+          process ILIKE '%\\Windows\\BitLocker%' OR
+          process ILIKE '%\\Windows\\ExploitGuard%' OR
+          process ILIKE '%\\Windows\\SystemRestore\\SR%' OR
+          process ILIKE '%\\Windows\\UpdateOrchestrator\\%' OR
+          process ILIKE '%\\Windows\\Windows Defender\\%' OR
+          process ILIKE '%\\Windows\\WindowsBackup\\%' OR
+          process ILIKE '%\\Windows\\WindowsUpdate\\%'
+        ) THEN 'Disable Critical Scheduled Task'
+        ELSE NULL
+      END AS detection_type
+    FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES
+    WHERE
+      (
+        process_path ILIKE '%\\schtasks.exe' OR
+        original_file_name ILIKE 'schtasks.exe'
+      )
+      AND (
+        (process ILIKE '% /delete %' AND (process ILIKE '%/tn%*%' OR process ILIKE '%\\Windows\\BitLocker%' OR process ILIKE '%\\Windows\\ExploitGuard%' OR process ILIKE '%\\Windows\\SystemRestore\\SR%' OR process ILIKE '%\\Windows\\UpdateOrchestrator\\%' OR process ILIKE '%\\Windows\\Windows Defender\\%' OR process ILIKE '%\\Windows\\WindowsBackup\\%' OR process ILIKE '%\\Windows\\WindowsUpdate\\%'))
+        OR
+        (process ILIKE '% /change %' AND process ILIKE '% /disable%' AND (process ILIKE '%\\Windows\\BitLocker%' OR process ILIKE '%\\Windows\\ExploitGuard%' OR process ILIKE '%\\Windows\\SystemRestore\\SR%' OR process ILIKE '%\\Windows\\UpdateOrchestrator\\%' OR process ILIKE '%\\Windows\\Windows Defender\\%' OR process ILIKE '%\\Windows\\WindowsBackup\\%' OR process ILIKE '%\\Windows\\WindowsUpdate\\%'))
+      )
+  )
+  SELECT
+    _time,
+    user_name,
+    NULL AS src,
+    dest,
+    CONCAT(
+      detection_type,
+      ' detected: ',
+      process
+    ) AS description
+  FROM task_deletion
+  WHERE detection_type IS NOT NULL

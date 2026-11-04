@@ -197,6 +197,7 @@ done
     "PUT file://$REPO_ROOT/sigma/sigma_compiler.py @SNOWFLAKE_XDR.REFERENCE.SIGMA_STAGE AUTO_COMPRESS = FALSE OVERWRITE = TRUE" \
     >> "$RUN_LOG" 2>&1 || fail "upload sigma_compiler.py"
 sql_file "setup/41_sigma.sql"
+sql_file "setup/42_detection_as_code.sql"
 
 # Response channels: substitute the Slack token (only used if the secret is new)
 CHANNELS_SQL="$(mktemp -t xdr_channels.XXXXXX).sql"

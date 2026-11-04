@@ -1,0 +1,66 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: c08e19ce-40dd-4f73-85e1-688ec5f93b0c
+name: Suspicious WebDAV Client Execution via Rundll32 to External IP
+description: Detects rundll32.exe invoking davclnt.dll DavSetCookie function to connect to external IP addresses, indicating
+  potential data exfiltration over WebDAV protocol.
+severity: 4
+tactic: TA0010
+technique: T1048.003
+threshold: 1
+window_minutes: 60
+lookback_minutes: 1440
+enabled: false
+shadow: true
+pinned: false
+version: 1
+managed_by: autopilot
+created_by: autopilot
+sql: |
+  WITH webdav_execution AS (
+    SELECT
+      _time,
+      dest,
+      user_name,
+      process,
+      process_path,
+      parent_process,
+      parent_process_name
+    FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES
+    WHERE
+      LOWER(process_path) LIKE '%\\rundll32.exe'
+      AND LOWER(COALESCE(parent_process_name, '')) LIKE '%svchost.exe'
+      AND LOWER(COALESCE(parent_process, '')) LIKE '%webclient%'
+      AND LOWER(process) LIKE '%davclnt.dll%'
+      AND LOWER(process) LIKE '%davsetcookie%'
+      AND REGEXP_LIKE(process, '://[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}', 'i')
+      AND NOT (
+        LOWER(process) LIKE '%://10.%'
+        OR LOWER(process) LIKE '%://192.168.%'
+        OR LOWER(process) LIKE '%://172.16.%'
+        OR LOWER(process) LIKE '%://172.17.%'
+        OR LOWER(process) LIKE '%://172.18.%'
+        OR LOWER(process) LIKE '%://172.19.%'
+        OR LOWER(process) LIKE '%://172.20.%'
+        OR LOWER(process) LIKE '%://172.21.%'
+        OR LOWER(process) LIKE '%://172.22.%'
+        OR LOWER(process) LIKE '%://172.23.%'
+        OR LOWER(process) LIKE '%://172.24.%'
+        OR LOWER(process) LIKE '%://172.25.%'
+        OR LOWER(process) LIKE '%://172.26.%'
+        OR LOWER(process) LIKE '%://172.27.%'
+        OR LOWER(process) LIKE '%://172.28.%'
+        OR LOWER(process) LIKE '%://172.29.%'
+        OR LOWER(process) LIKE '%://172.30.%'
+        OR LOWER(process) LIKE '%://172.31.%'
+        OR LOWER(process) LIKE '%://127.%'
+        OR LOWER(process) LIKE '%://169.254.%'
+      )
+  )
+  SELECT
+    _time,
+    user_name,
+    dest AS src,
+    NULL AS dest,
+    'Rundll32 executed davclnt.dll DavSetCookie to external IP: ' || REGEXP_SUBSTR(process, '([0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3})', 1, 1, 'e') || ' from parent svchost WebClient service' AS description
+  FROM webdav_execution

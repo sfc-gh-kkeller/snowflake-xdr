@@ -1,0 +1,30 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: d9218c9b-3795-4d4c-8380-387a05a9213d
+name: Brute force followed by successful login
+description: Five or more failed logins for a user from one source, followed by a successful login from the same source within
+  3 hours.
+severity: 5
+tactic: TA0006
+technique: T1110
+threshold: 1
+window_minutes: 60
+lookback_minutes: 10080
+enabled: true
+shadow: false
+pinned: false
+version: 1
+managed_by: human
+created_by: demo_seed
+sql: |
+  SELECT s._time, s.user_name, s.src, s.dest,
+         'Brute force succeeded: ' || f.fails || ' failures then success for ' || s.user_name || ' from ' || s.src AS description
+  FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION s
+  JOIN (SELECT user_name, src, COUNT(*) AS fails, MAX(_time) AS last_fail
+        FROM SNOWFLAKE_XDR.RAW_LOGS.AUTHENTICATION
+        WHERE action = 'failure'
+        GROUP BY user_name, src
+        HAVING COUNT(*) >= 5) f
+    ON s.user_name = f.user_name AND s.src = f.src
+  WHERE s.action = 'success'
+    AND s._time BETWEEN f.last_fail AND DATEADD('hour', 3, f.last_fail)

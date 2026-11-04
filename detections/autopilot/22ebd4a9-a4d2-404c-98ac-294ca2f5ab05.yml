@@ -1,0 +1,81 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: 22ebd4a9-a4d2-404c-98ac-294ca2f5ab05
+name: T1105 Ingress Tool Transfer via LOLBins
+description: Detects processes downloading payloads using PowerShell web cmdlets, certutil, bitsadmin, or GUP.exe from non-Notepad++
+  parents.
+severity: 4
+tactic: TA0011
+technique: T1105
+threshold: 1
+window_minutes: 60
+lookback_minutes: 1440
+enabled: true
+shadow: false
+pinned: false
+version: 1
+managed_by: autopilot
+created_by: autopilot
+sql: |
+  WITH ingress_candidates AS (
+    SELECT
+      _time,
+      dest,
+      user_name,
+      process,
+      process_path,
+      parent_process_name,
+      original_file_name,
+      CASE
+        WHEN process ILIKE '%DownloadString%' OR process ILIKE '%DownloadFile%' OR process ILIKE '%Invoke-WebRequest%' OR process ILIKE '%iwr %' OR process ILIKE '%wget %' OR process ILIKE '%curl %' THEN 'PowerShell Web Request'
+        WHEN process ILIKE '%certutil%' AND (process ILIKE '%-urlcache%' OR process ILIKE '%/urlcache%') AND (process ILIKE '%http://%' OR process ILIKE '%https://%') THEN 'Certutil URLCache'
+        WHEN process ILIKE '%bitsadmin%' AND (process ILIKE '%/transfer%' OR process ILIKE '%-transfer%') AND (process ILIKE '%http://%' OR process ILIKE '%https://%') THEN 'Bitsadmin Transfer'
+        WHEN (process_path ILIKE '%\\GUP.exe' OR COALESCE(original_file_name, '') ILIKE 'gup.exe') AND process ILIKE '% -unzipTo %' AND (process ILIKE '%http://%' OR process ILIKE '%https://%') THEN 'GUP Proxy Download'
+        ELSE NULL
+      END AS technique
+    FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES
+    WHERE
+      (
+        (process ILIKE '%powershell%' OR process ILIKE '%pwsh%') AND (
+          process ILIKE '%DownloadString%' OR
+          process ILIKE '%DownloadFile%' OR
+          process ILIKE '%Invoke-WebRequest%' OR
+          process ILIKE '%iwr %' OR
+          process ILIKE '%wget %' OR
+          process ILIKE '%curl %'
+        )
+      )
+      OR (
+        process ILIKE '%certutil%' AND
+        (process ILIKE '%-urlcache%' OR process ILIKE '%/urlcache%') AND
+        (process ILIKE '%http://%' OR process ILIKE '%https://%')
+      )
+      OR (
+        process ILIKE '%bitsadmin%' AND
+        (process ILIKE '%/transfer%' OR process ILIKE '%-transfer%') AND
+        (process ILIKE '%http://%' OR process ILIKE '%https://%')
+      )
+      OR (
+        (process_path ILIKE '%\\GUP.exe' OR COALESCE(original_file_name, '') ILIKE 'gup.exe') AND
+        process ILIKE '% -unzipTo %' AND
+        (process ILIKE '%http://%' OR process ILIKE '%https://%') AND
+        COALESCE(parent_process_name, '') NOT ILIKE '%notepad++.exe'
+      )
+  )
+  SELECT
+    _time,
+    user_name,
+    NULL AS src,
+    dest,
+    CONCAT(
+      'T1105 Ingress Tool Transfer detected: ',
+      technique,
+      ' on host ',
+      dest,
+      ' by user ',
+      COALESCE(user_name, 'UNKNOWN'),
+      '. Command: ',
+      SUBSTR(process, 1, 200)
+    ) AS description
+  FROM ingress_candidates
+  WHERE technique IS NOT NULL

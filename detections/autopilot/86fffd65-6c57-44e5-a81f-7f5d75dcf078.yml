@@ -1,0 +1,20 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: 86fffd65-6c57-44e5-a81f-7f5d75dcf078
+name: T1005 Bulk Sensitive File Reads from Local System
+description: Detects a user reading many files from sensitive paths within an hour, particularly outside business hours, indicating
+  potential data exfiltration or reconnaissance.
+severity: 4
+tactic: TA0009
+technique: T1005
+threshold: 1
+window_minutes: 60
+lookback_minutes: 1440
+enabled: true
+shadow: false
+pinned: false
+version: 2
+managed_by: autopilot
+created_by: autopilot
+sql: |
+  WITH sensitive_reads AS (SELECT _time, dest, user_name, file_path, file_name, process_name FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_FILESYSTEM WHERE action IN ('read', 'open', 'access') AND (LOWER(file_path) ILIKE '%\\confidential\\%' OR LOWER(file_path) ILIKE '%\\sensitive\\%' OR LOWER(file_path) ILIKE '%\\finance\\%' OR LOWER(file_path) ILIKE '%\\accounting\\%' OR LOWER(file_path) ILIKE '%\\payroll\\%' OR LOWER(file_path) ILIKE '%\\hr\\%' OR LOWER(file_path) ILIKE '%\\legal\\%' OR LOWER(file_path) ILIKE '%\\contracts\\%' OR LOWER(file_path) ILIKE '%\\private\\%' OR LOWER(file_path) ILIKE '%\\credentials\\%' OR LOWER(file_path) ILIKE '%\\passwords\\%' OR LOWER(file_path) ILIKE '%\\customer_records\\%' OR LOWER(file_path) ILIKE '%\\employee_data\\%' OR LOWER(file_path) ILIKE '%user data\\%' OR LOWER(file_path) ILIKE '%\\appdata\\%cookies%' OR LOWER(file_path) ILIKE '%\\appdata\\%login data%' OR LOWER(file_name) ILIKE '%.kdbx' OR LOWER(file_name) ILIKE '%.key' OR LOWER(file_name) ILIKE '%.pem' OR LOWER(file_name) ILIKE '%.pfx' OR LOWER(file_name) ILIKE '%password%' OR LOWER(file_name) ILIKE '%credential%') AND COALESCE(process_name, '') NOT ILIKE '%backup%' AND COALESCE(process_name, '') NOT ILIKE '%antivirus%' AND COALESCE(process_name, '') NOT ILIKE '%defender%' AND COALESCE(process_name, '') NOT ILIKE '%scanner%' AND COALESCE(process_name, '') NOT ILIKE '%dlp%'), aggregated AS (SELECT TIME_SLICE(_time::TIMESTAMP_NTZ, 10, 'MINUTE') AS time_window, dest, user_name, COUNT(DISTINCT file_name) AS distinct_files, MAX(_time) AS _time, LISTAGG(DISTINCT process_name, ', ') WITHIN GROUP (ORDER BY process_name) AS processes FROM sensitive_reads GROUP BY time_window, dest, user_name HAVING COUNT(DISTINCT file_name) >= 3) SELECT a._time, a.user_name, NULL AS src, a.dest, 'User ' || a.user_name || ' read ' || a.distinct_files || ' sensitive files in 10 minutes from ' || a.dest || '. Processes: ' || a.processes AS description FROM aggregated a

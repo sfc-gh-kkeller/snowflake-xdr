@@ -1,0 +1,37 @@
+# Exported from Snowflake by scripts/export_rules.py - edit and open a pull request;
+# CI verifies it and the merge applies it (setup/42_detection_as_code.sql).
+id: 87b27159-2816-443e-91fb-b23a0ebc7abe
+name: Office Application Spawning Suspicious Child Process
+description: Detects Microsoft Office applications spawning command-line interpreters or scripting engines commonly used in
+  spearphishing attacks.
+severity: 4
+tactic: TA0001
+technique: T1566.001
+threshold: 1
+window_minutes: 60
+lookback_minutes: 1440
+enabled: true
+shadow: false
+pinned: false
+version: 1
+managed_by: autopilot
+created_by: autopilot
+sql: "WITH suspicious_spawns AS (\n  SELECT\n    _time,\n    dest,\n    user_name,\n    process,\n    process_name,\n    process_path,\n\
+  \    parent_process_name,\n    COALESCE(original_file_name, '') AS original_file_name\n  FROM SNOWFLAKE_XDR.RAW_LOGS.ENDPOINT_PROCESSES\n\
+  \  WHERE \n    (UPPER(COALESCE(parent_process_name, '')) ILIKE '%WINWORD.EXE%'\n     OR UPPER(COALESCE(parent_process_name,\
+  \ '')) ILIKE '%EXCEL.EXE%'\n     OR UPPER(COALESCE(parent_process_name, '')) ILIKE '%POWERPNT.EXE%'\n     OR UPPER(COALESCE(parent_process_name,\
+  \ '')) ILIKE '%OUTLOOK.EXE%'\n     OR UPPER(COALESCE(parent_process_name, '')) ILIKE '%MSACCESS.EXE%'\n     OR UPPER(COALESCE(parent_process_name,\
+  \ '')) ILIKE '%MSPUB.EXE%'\n     OR UPPER(COALESCE(parent_process_name, '')) ILIKE '%ONENOTE.EXE%'\n     OR UPPER(COALESCE(parent_process_name,\
+  \ '')) ILIKE '%HH.EXE%')\n    AND (\n      UPPER(COALESCE(process_path, '')) ILIKE '%\\\\CMD.EXE'\n      OR UPPER(COALESCE(process_path,\
+  \ '')) ILIKE '%\\\\POWERSHELL.EXE'\n      OR UPPER(COALESCE(process_path, '')) ILIKE '%\\\\PWSH.EXE'\n      OR UPPER(COALESCE(process_path,\
+  \ '')) ILIKE '%\\\\WSCRIPT.EXE'\n      OR UPPER(COALESCE(process_path, '')) ILIKE '%\\\\CSCRIPT.EXE'\n      OR UPPER(COALESCE(process_path,\
+  \ '')) ILIKE '%\\\\MSHTA.EXE'\n      OR UPPER(COALESCE(process_path, '')) ILIKE '%\\\\RUNDLL32.EXE'\n      OR UPPER(COALESCE(process_path,\
+  \ '')) ILIKE '%\\\\REGSVR32.EXE'\n      OR UPPER(COALESCE(process_path, '')) ILIKE '%\\\\CERTUTIL.EXE'\n      OR UPPER(COALESCE(process_path,\
+  \ '')) ILIKE '%\\\\BITSADMIN.EXE'\n      OR UPPER(COALESCE(process_path, '')) ILIKE '%\\\\MSIEXEC.EXE'\n      OR UPPER(COALESCE(process_path,\
+  \ '')) ILIKE '%\\\\SCHTASKS.EXE'\n      OR UPPER(COALESCE(process_path, '')) ILIKE '%\\\\WMIC.EXE'\n      OR UPPER(original_file_name)\
+  \ IN ('CMD.EXE', 'POWERSHELL.EXE', 'WSCRIPT.EXE', 'CSCRIPT.EXE', 'MSHTA.EXE', 'RUNDLL32.EXE', 'CERTUTIL.EXE', 'BITSADMIN.EXE',\
+  \ 'REGSVR32.EXE', 'MSIEXEC.EXE', 'SCHTASKS.EXE', 'WMIC.EXE')\n    )\n)\nSELECT\n  _time,\n  user_name,\n  NULL AS src,\n\
+  \  dest,\n  CONCAT(\n    'Office application spawned suspicious process: ',\n    parent_process_name,\n    ' -> ',\n   \
+  \ process_name,\n    ' on host ',\n    dest,\n    '. Command: ',\n    LEFT(process, 200)\n  ) AS description\nFROM suspicious_spawns\n\
+  WHERE \n  NOT (UPPER(COALESCE(process_path, '')) ILIKE '%\\\\APPDATA\\\\%' AND UPPER(COALESCE(process, '')) ILIKE '%MICROSOFT%')\n\
+  ORDER BY _time DESC\n"
