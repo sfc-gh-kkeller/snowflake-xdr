@@ -76,4 +76,13 @@ describe("Rule pack handlers", () => {
     expect((opts as { binds: unknown[] }).binds).toEqual(["snowflake", true])
     expect(r.message).toMatch(/1 rule\(s\) installed/)
   })
+
+  it("Sigma sync calls the github import and reports counts", async () => {
+    vi.mocked(querySnowflakeLongRunning).mockResolvedValueOnce([{ R: JSON.stringify({ ok: true, origin: "github:r1", new: 3, updated: 2, unchanged: 9 }) }])
+    const r = await packs["packs.sigma_sync"]()
+    expect(vi.mocked(querySnowflakeLongRunning).mock.calls[0][0]).toBe("CALL SNOWFLAKE_XDR.REFERENCE.SIGMA_IMPORT('github')")
+    expect(r.message).toBe("github:r1: 3 new, 2 updated, 9 unchanged")
+    vi.mocked(querySnowflakeLongRunning).mockResolvedValueOnce([{ R: JSON.stringify({ ok: false, message: "no access" }) }])
+    await expect(packs["packs.sigma_sync"]()).rejects.toThrow(/no access/)
+  })
 })

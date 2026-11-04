@@ -190,6 +190,13 @@ for f in 02_raw_log_tables 02b_splunk_views 03_detection_tables \
          11_custom_rules; do
     sql_file "setup/$f.sql"
 done
+# Sigma (41): the procedure imports the compiler module, so it must be on the stage first
+"$SNOW" sql -c "$CONN" -q "CREATE STAGE IF NOT EXISTS SNOWFLAKE_XDR.REFERENCE.SIGMA_STAGE" >> "$RUN_LOG" 2>&1 \
+    || fail "create SIGMA_STAGE"
+"$SNOW" sql -c "$CONN" --enable-templating NONE -q \
+    "PUT file://$REPO_ROOT/sigma/sigma_compiler.py @SNOWFLAKE_XDR.REFERENCE.SIGMA_STAGE AUTO_COMPRESS = FALSE OVERWRITE = TRUE" \
+    >> "$RUN_LOG" 2>&1 || fail "upload sigma_compiler.py"
+sql_file "setup/41_sigma.sql"
 
 # Response channels: substitute the Slack token (only used if the secret is new)
 CHANNELS_SQL="$(mktemp -t xdr_channels.XXXXXX).sql"
@@ -291,6 +298,10 @@ for pk in entra okta databricks postgres clickhouse salesforce; do   # demo: ins
     sql_call "INSTALL_RULE_PACK $pk"  "CALL SNOWFLAKE_XDR.REFERENCE.INSTALL_RULE_PACK('$pk', TRUE)"
 done
 sql_call "SEED_PACK_DEMO"            "CALL SNOWFLAKE_XDR.DETECTIONS.RUN_CANARIES('seed:all')"
+# Phase 5: SigmaHQ baseline (rule-packs/sigma/), compiled + pre-install verified; installs then trickle
+# in through the autopilot's pack_rule step under the daily change budget
+log "importing Sigma baseline (rule-packs/sigma/)"
+CONN="$CONN" SNOW="$SNOW" bash scripts/sync_sigma.sh >> "$RUN_LOG" 2>&1 || fail "scripts/sync_sigma.sh"
 sql_call "RUN_CANARIES"              "CALL SNOWFLAKE_XDR.DETECTIONS.RUN_CANARIES('all')"
 sql_call "TRUST_LADDER"              "CALL SNOWFLAKE_XDR.DETECTIONS.TRUST_LADDER(NULL)"
 sql_call "SEED_DEMO_COMPROMISE"      "CALL SNOWFLAKE_XDR.INCIDENTS.SEED_DEMO_COMPROMISE()"

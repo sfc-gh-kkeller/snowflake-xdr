@@ -110,6 +110,9 @@ def inject_table(s, cache, fx, marker, touched):
             if cols[k] in ("VARIANT", "OBJECT", "ARRAY"):
                 exprs.append("PARSE_JSON(?)")
                 binds.append(json.dumps(v))
+            elif cols[k] != "TEXT":
+                exprs.append(f"TRY_CAST(?::VARCHAR AS {cols[k]})")
+                binds.append(str(v))
             else:
                 exprs.append("?")
                 binds.append(v if isinstance(v, (int, float)) else str(v))
@@ -267,9 +270,89 @@ def seed(s, pack):
     return {"seeded_fixtures": n, "tables": sorted(touched)}
 
 
+def bulk_insert(s, cache, table, rows_):
+    """One INSERT per table for many fixture rows (pre-install verification of large packs)."""
+    cols = table_columns(s, cache, table)
+    names = sorted({k.lower() for r in rows_ for k in r} - {"_time", "index_name"})
+    for k in names:
+        if not COL_RE.match(k) or k not in cols:
+            raise ValueError(f"{table} has no column {k}")
+
+    def cast(k):
+        t = cols[k]
+        if t in ("VARIANT", "OBJECT", "ARRAY"):
+            return f"j:{k}"
+        # Fixtures are strings; a value that is not a valid number/timestamp lands as NULL, not an error
+        return f"j:{k}::VARCHAR" if t == "TEXT" else f"TRY_CAST(j:{k}::VARCHAR AS {t})"
+    for i in range(0, len(rows_), 200):
+        chunk = rows_[i:i + 200]
+        payload = [json.dumps({k.lower(): v for k, v in r.items()}) for r in chunk]
+        s.sql(f"""INSERT INTO {DB}.RAW_LOGS.{table} (_time, index_name{''.join(', ' + k for k in names)})
+                  SELECT DATEADD('second', -60, CURRENT_TIMESTAMP()), 'canary'{''.join(', ' + cast(k) for k in names)}
+                  FROM (SELECT PARSE_JSON(column1) AS j FROM VALUES {', '.join(['(?)'] * len(chunk))})""",
+              params=payload).collect()
+
+
+def verify_pack(s, pack, batch):
+    """Pre-install verification: every rule of a pack is tested against its own fixtures before it is
+    installed (one injection per table, one cleanup). Results land on RULE_PACK_RULES.verify_status and in
+    CANARY_RUNS (mode 'preinstall'); INSTALL_RULE_PACK skips rules that fail. RUN_CANARIES('verify:<pack>')."""
+    rules = rows(s, f"""SELECT rule_id, code, threshold_count, lookback_minutes, source_table, fixtures
+                        FROM {DB}.REFERENCE.RULE_PACK_RULES WHERE pack_id = ? AND fixtures IS NOT NULL
+                        ORDER BY rule_id""", [pack])
+    cache, by_table, plan, touched = {}, {}, [], set()
+    started = one(s, "SELECT CURRENT_TIMESTAMP()::VARCHAR AS t")["T"]
+    for r in rules:
+        fx = json.loads(r["FIXTURES"]) if isinstance(r["FIXTURES"], str) else r["FIXTURES"]
+        if any(x.get("otel") for x in (fx.get("positive") or []) + (fx.get("negative") or [])):
+            continue  # OTel fixtures go through ingest; use the per-rule canary for those packs
+        tag = re.sub(r"[^a-z0-9]", "", r["RULE_ID"].lower())
+        pos_m, neg_m = f"{MARK}p{tag}{batch[:6]}", f"{MARK}n{tag}{batch[:6]}"
+        for kind, m in (("positive", pos_m), ("negative", neg_m)):
+            for x in fx.get(kind) or []:
+                t = str(x["table"]).upper()
+                if not TABLE_RE.match(t):
+                    raise ValueError(f"bad table {t}")
+                for n in range(int(x.get("count", 1))):
+                    by_table.setdefault(t, []).append(fill(x.get("row") or {}, m, n))
+        plan.append((r, pos_m, neg_m, len(fx.get("positive") or [])))
+    out = {"pass": 0, "fail": 0, "error": 0, "failures": []}
+    try:
+        for t, rs in by_table.items():
+            bulk_insert(s, cache, t, rs)
+            touched.add(t)
+        for r, pos_m, neg_m, n_pos_fx in plan:
+            rule = {"CODE": r["CODE"], "LOOKBACK_MINUTES": r["LOOKBACK_MINUTES"]}
+            try:
+                need = max(1, int(r["THRESHOLD_COUNT"] or 1))
+                n_pos, n_neg = matches(s, rule, pos_m), matches(s, rule, neg_m)
+                status = "pass" if n_pos >= need and n_neg < need else "fail"
+                msg = ("ok" if status == "pass" else "positive fixture did not fire" if n_pos < need
+                       else "negative fixture fired (false positive)")
+            except Exception as e:
+                n_pos = n_neg = None
+                status, msg = "error", "rule error: " + str(e)[:300]
+            out[status] += 1
+            detail = {"mode": "preinstall", "message": msg, "positive_matches": n_pos, "negative_matches": n_neg,
+                      "positive_fixtures": n_pos_fx}
+            if status != "pass" and len(out["failures"]) < 50:
+                out["failures"].append({"rule_id": r["RULE_ID"], "message": msg})
+            s.sql(f"""UPDATE {DB}.REFERENCE.RULE_PACK_RULES SET verify_status = ?, verify_detail = PARSE_JSON(?),
+                        verified_at = CURRENT_TIMESTAMP() WHERE rule_id = ?""",
+                  params=[status, json.dumps(detail), r["RULE_ID"]]).collect()
+            s.sql(f"""INSERT INTO {DB}.DETECTIONS.CANARY_RUNS (batch_id, rule_id, status, positive_fired, negative_fired,
+                        latency_seconds, detail) SELECT ?, ?, ?, ?, ?, -1, PARSE_JSON(?)""",
+                  params=[batch, r["RULE_ID"], status, bool(n_pos), bool(n_neg), json.dumps(detail)]).collect()
+    finally:
+        cleanup(s, touched, started)
+    return {"batch_id": batch, "pack": pack, "rules": len(plan), **out}
+
+
 def main(s, P_RULE_ID):
     batch = one(s, "SELECT REPLACE(UUID_STRING(), '-', '') AS b")["B"]
     want = (P_RULE_ID or "all")
+    if want.lower().startswith("verify:"):
+        return verify_pack(s, want.split(":", 1)[1].lower(), batch)
     if want.lower().startswith("seed:"):
         return seed(s, want.split(":", 1)[1].lower() or "all")
     if want.lower().startswith("candidate:"):
@@ -279,10 +362,13 @@ def main(s, P_RULE_ID):
         if not f:
             return {"status": "no_fixture", "rule_id": target}
         return run_one(s, {}, f, batch, candidate=cand) or {"status": "error", "message": "candidate not found"}
+    # 'all' = every enabled/shadow rule; 'pack:<pack_id>' = that pack's installed rules; else one rule
+    pack = want[5:].lower() if want.lower().startswith("pack:") else None
     fixtures = rows(s, f"""SELECT v.* FROM {DB}.DETECTIONS.V_CANARY_FIXTURES v
                            JOIN {DB}.DETECTIONS.CUSTOM_RULES c ON c.rule_id = v.rule_id
-                           WHERE (? = 'all' AND (c.enabled OR c.test_mode)) OR v.rule_id = ?
-                           ORDER BY v.rule_id""", [want, want])
+                           WHERE (? = 'all' AND (c.enabled OR c.test_mode))
+                              OR (c.pack_id = ? AND (c.enabled OR c.test_mode)) OR v.rule_id = ?
+                           ORDER BY v.rule_id""", [want, pack or "", want])
     cache, out = {}, []
     for f in fixtures:
         r = run_one(s, cache, f, batch)

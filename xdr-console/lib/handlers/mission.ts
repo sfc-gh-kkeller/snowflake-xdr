@@ -211,4 +211,25 @@ export const packs = {
     const w = Array.isArray(r.waiting_for_data) ? r.waiting_for_data.length : 0
     return { message: r.message ? String(r.message) : `${n} rule(s) installed (${r.mode}), ${w} waiting for data`, result: r }
   },
+
+  /** Sigma import (setup/41_sigma.sql): catalogue state per pack, last sync, and rules that did not make it. */
+  "packs.sigma": async () => {
+    const [byState, lastSync, problems] = await Promise.all([
+      rows(`SELECT COALESCE(pack_id, 'unmapped') AS pack_id, state, COUNT(*) AS n
+            FROM SNOWFLAKE_XDR.REFERENCE.V_SIGMA_STATUS GROUP BY 1, 2 ORDER BY 1, 3 DESC`),
+      rows(`SELECT origin, started_at, result FROM SNOWFLAKE_XDR.REFERENCE.SIGMA_SYNC_RUNS
+            ORDER BY started_at DESC LIMIT 1`),
+      rows(`SELECT SPLIT_PART(compile_reason, ':', 1) AS reason, COUNT(*) AS n
+            FROM SNOWFLAKE_XDR.REFERENCE.V_SIGMA_STATUS WHERE state = 'not_compiled'
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 8`),
+    ])
+    const sync = lastSync[0] ? { ...lastSync[0], result: parseVariant(lastSync[0].result) ?? {} } : null
+    return { by_state: byState, last_sync: sync, not_compiled: problems }
+  },
+
+  "packs.sigma_sync": async () => {
+    const r = await scalar<Row>("CALL SNOWFLAKE_XDR.REFERENCE.SIGMA_IMPORT('github')", [], { long: true })
+    if (!r?.ok) throw new InputError(String(r?.message ?? "Sigma sync failed"))
+    return { message: r.message ? String(r.message) : `${r.origin}: ${r.new} new, ${r.updated} updated, ${r.unchanged} unchanged`, result: r }
+  },
 }

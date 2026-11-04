@@ -118,7 +118,7 @@ import re
 import yaml
 
 DB = "SNOWFLAKE_XDR"
-ID_RE = re.compile(r"^[A-Z]{2,5}-[0-9]{3}$")
+ID_RE = re.compile(r"^[A-Z]{2,5}-[0-9]{3,5}$")
 PACK_RE = re.compile(r"^[a-z][a-z0-9_]{1,40}$")
 TECH_RE = re.compile(r"^T[0-9]{4}(\.[0-9]{3})?$")
 TACTIC_RE = re.compile(r"^TA[0-9]{4}$")
@@ -346,6 +346,9 @@ def main(s, P_PACK_ID, P_FORCE):
                     updated.append(r["RULE_ID"])
                 continue
             if r["INSTALL_STATE"] in ("rejected", "rolled_back") and not force:
+                continue
+            if r.get("VERIFY_STATUS") in ("fail", "error"):
+                # Failed pre-install verification (its own canary): never install; Mission Control shows it
                 continue
             if n == 0 and not force:
                 if r["INSTALL_STATE"] != "waiting_for_data":

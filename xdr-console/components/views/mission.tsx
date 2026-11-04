@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import Link from "next/link"
-import { OctagonPause, Play, Undo2, Mail, Package, Target } from "lucide-react"
+import { OctagonPause, Play, Undo2, Mail, Package, Target, ShieldCheck } from "lucide-react"
 import { useXdr, useXdrAction, type Row } from "@/lib/client"
 import { fmtAgo, fmtNum, fmtTime, truncate } from "@/lib/format"
 import {
@@ -70,6 +70,7 @@ export function Mission() {
       <ThreatPanel />
       <Ledger />
       <RulePacks />
+      <SigmaPanel />
       <Verification />
       <Guardrails status={s} />
       <Briefing />
@@ -217,6 +218,61 @@ function RulePacks() {
         {(rowsList) => <DataTable rows={rowsList} columns={columns} rowKey="pack_id" dense empty="No packs loaded. Run scripts/load_rule_packs.sh." />}
       </QueryState>
       <Drawer open={!!open} onClose={() => setOpen(null)}>{open && <PackDetail pack={open} />}</Drawer>
+    </Panel>
+  )
+}
+
+const SIGMA_TONE: Record<string, string> = {
+  verified: "good", installed: "info", canary_failing: "bad", verification_failed: "bad",
+  catalogued: "muted", waiting_for_data: "muted", filtered: "muted", not_compiled: "warn",
+}
+
+function SigmaPanel() {
+  const q = useXdr<Row>("packs.sigma", {}, { refetchInterval: 120_000 })
+  const sync = useXdrAction("packs.sigma_sync", { invalidate: ["packs.", "mission."] })
+  return (
+    <Panel
+      title={<span className="flex items-center gap-1.5"><ShieldCheck className="h-4 w-4 text-primary" />Sigma community rules</span>}
+      description="SigmaHQ rules compiled to SQL without AI. Each gets synthesised canaries (one per branch, plus a must-not-fire case) and must pass them before it can install. A weekly sync pulls new releases."
+      actions={<ActionButton action={sync} params={{}}>Sync latest release</ActionButton>}
+    >
+      <ActionResult action={sync} />
+      <QueryState q={q}>
+        {(d) => {
+          const byPack: Record<string, Row[]> = {}
+          for (const r of (d.by_state as Row[]) ?? []) (byPack[r.pack_id] ??= []).push(r)
+          const res = (d.last_sync?.result ?? {}) as Row
+          return (
+            <div className="space-y-3 text-sm">
+              {d.last_sync && (
+                <p className="text-muted-foreground">
+                  Last sync {fmtAgo(d.last_sync.started_at)} from <span className="font-mono">{d.last_sync.origin}</span>:{" "}
+                  {fmtNum(res.files)} files, {fmtNum(res.compiled)} compiled, {fmtNum(res.new)} new, {fmtNum(res.updated)} updated.
+                </p>
+              )}
+              <div className="grid gap-2 md:grid-cols-4">
+                {Object.entries(byPack).map(([pid, states]) => (
+                  <div key={pid} className="rounded border p-2">
+                    <div className="mb-1 font-mono text-xs">{pid}</div>
+                    <div className="flex flex-wrap gap-1">
+                      {states.map((s) => (
+                        <Pill key={s.state} tone={SIGMA_TONE[s.state] ?? "muted"}>{String(s.state).replace(/_/g, " ")} {fmtNum(s.n)}</Pill>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {((d.not_compiled as Row[]) ?? []).length > 0 && (
+                <Disclosure title="Why some rules are not compiled">
+                  <ul className="list-disc pl-5 text-xs text-muted-foreground">
+                    {(d.not_compiled as Row[]).map((r) => <li key={r.reason}>{r.reason}: {fmtNum(r.n)}</li>)}
+                  </ul>
+                </Disclosure>
+              )}
+            </div>
+          )
+        }}
+      </QueryState>
     </Panel>
   )
 }
