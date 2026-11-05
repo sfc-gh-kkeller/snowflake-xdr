@@ -126,6 +126,12 @@ LEFT JOIN f ON f.rule_id = r.rule_id;
 -- ---------------------------------------------------------------------------
 -- 4. Score, explain and route findings
 -- ---------------------------------------------------------------------------
+-- Owned by setup/47_ueba.sql; created here too because scoring reads it
+CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.DETECTIONS.UEBA_ANOMALIES (
+    anomaly_id VARCHAR DEFAULT UUID_STRING(), entity_type VARCHAR(20), entity VARCHAR(500), kind VARCHAR(40),
+    score FLOAT, detail VARCHAR(1000), evidence VARIANT, method VARCHAR(20), event_time TIMESTAMP_LTZ,
+    detected_at TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(), dedupe_key VARCHAR(1000));
+
 CREATE OR REPLACE PROCEDURE SNOWFLAKE_XDR.DETECTIONS.SCORE_CONFIDENCE()
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -176,13 +182,22 @@ BEGIN
             WHERE c.rule_id NOT LIKE 'TC-%'
             GROUP BY c.finding_id
         ),
+        ueba AS (   -- behaviour anomalies on the same entity, 24h before to 6h after (setup/47_ueba.sql)
+            SELECT c.finding_id, MAX(a.score) AS ueba_score, ARRAY_SLICE(ARRAY_AGG(DISTINCT a.kind), 0, 5) AS ueba_kinds
+            FROM cand c JOIN SNOWFLAKE_XDR.DETECTIONS.UEBA_ANOMALIES a
+              ON LOWER(a.entity) IN (LOWER(c.keys[0]::VARCHAR), LOWER(c.keys[1]::VARCHAR), LOWER(c.keys[2]::VARCHAR))
+             AND a.event_time BETWEEN DATEADD('hour', -24, c.event_time) AND DATEADD('hour', 6, c.event_time)
+            GROUP BY c.finding_id
+        ),
         x AS (
             SELECT c.*, rp.precision AS rule_p, rp.judged AS rule_n, rp.tp AS rule_tp, rp.fp AS rule_fp,
                    p.fp_count AS ent_fp, p.tp_count AS ent_tp, p.total_count AS ent_n,
                    COALESCE(cr.n_rules, 0) AS n_corr, cr.rules AS corr_rules,
-                   i.confidence AS ioc_conf, i.ioc_value AS ioc_value, tc.tc_rules
+                   i.confidence AS ioc_conf, i.ioc_value AS ioc_value, tc.tc_rules,
+                   ub.ueba_score, ub.ueba_kinds
             FROM cand c
             LEFT JOIN tc ON tc.finding_id = c.finding_id
+            LEFT JOIN ueba ub ON ub.finding_id = c.finding_id
             LEFT JOIN SNOWFLAKE_XDR.DETECTIONS.V_RULE_PRECISION rp ON rp.rule_id = c.rule_id
             LEFT JOIN SNOWFLAKE_XDR.DETECTIONS.FP_PATTERNS p ON p.rule_id = c.rule_id AND p.entity = c.entity
             LEFT JOIN corr cr ON cr.finding_id = c.finding_id
@@ -201,14 +216,16 @@ BEGIN
                    IFF(incident_id IS NOT NULL, 0.7, 0) AS inc_lo,
                    IFF(ioc_conf IS NULL, 0, (ioc_conf / 100 - 0.5) * 3) AS ioc_lo,
                    IFF(ai_fp_probability IS NULL, 0, -(ai_fp_probability - 0.5) * 1.5) AS ai_lo,
-                   IFF(tc_rules IS NULL, 0, 1.0) AS tc_lo
+                   IFF(tc_rules IS NULL, 0, 1.0) AS tc_lo,
+                   -- UEBA is corroboration, never proof on its own: at most +1.5 log-odds
+                   ROUND(LEAST(1.5, COALESCE(ueba_score, 0) * 1.8), 2) AS ueba_lo
             FROM x
         )
         SELECT finding_id,
-               ROUND(1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo + tc_lo))), 3) AS score,
-               CASE WHEN 1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo + tc_lo)))
+               ROUND(1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo + tc_lo + ueba_lo))), 3) AS score,
+               CASE WHEN 1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo + tc_lo + ueba_lo)))
                          >= SNOWFLAKE_XDR.DETECTIONS.CONF_SETTING('high_threshold') THEN 'high'
-                    WHEN 1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo + tc_lo)))
+                    WHEN 1 / (1 + EXP(-(base_lo + ent_lo + corr_lo + inc_lo + ioc_lo + ai_lo + tc_lo + ueba_lo)))
                          < SNOWFLAKE_XDR.DETECTIONS.CONF_SETTING('low_threshold') THEN 'low'
                     ELSE 'medium' END AS band,
                ARRAY_CONSTRUCT_COMPACT(
@@ -226,7 +243,9 @@ BEGIN
                    IFF(ai_lo <> 0, OBJECT_CONSTRUCT('factor', 'AI second opinion', 'effect', ROUND(ai_lo, 2),
                        'detail', ROUND(ai_fp_probability * 100) || '% likely false positive'), NULL),
                    IFF(tc_lo <> 0, OBJECT_CONSTRUCT('factor', 'Trust Center', 'effect', tc_lo,
-                       'detail', 'entity is at risk in Snowflake Trust Center: ' || ARRAY_TO_STRING(tc_rules, ', ')), NULL)) AS factors
+                       'detail', 'entity is at risk in Snowflake Trust Center: ' || ARRAY_TO_STRING(tc_rules, ', ')), NULL),
+                   IFF(ueba_lo <> 0, OBJECT_CONSTRUCT('factor', 'behaviour anomaly', 'effect', ueba_lo,
+                       'detail', 'unusual for this entity: ' || ARRAY_TO_STRING(ueba_kinds, ', ')), NULL)) AS factors
         FROM e
     ) s
     WHERE t.finding_id = s.finding_id;

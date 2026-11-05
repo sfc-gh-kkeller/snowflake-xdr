@@ -90,6 +90,8 @@ export function Entity360() {
                 idleText="Generate an analyst-style summary of this entity's activity, risk and recommended next steps."
               />
 
+              <Behaviour entity={q} />
+
               {d.findings.length > 0 && (
                 <Panel title="XDR findings for this entity">
                   <DataTable
@@ -132,5 +134,56 @@ export function Entity360() {
         </QueryState>
       )}
     </div>
+  )
+}
+
+const KIND_LABEL: Record<string, string> = {
+  new_country: "new country", new_source_ip: "new address", off_hours: "off hours", volume_spike: "volume spike",
+  peer_outlier: "peer outlier", new_lineage: "new process lineage", new_cloud_action: "new cloud action",
+  ml_daily_activity: "unusual daily activity (Cortex ML)",
+}
+
+/** UEBA: the 30-day baseline and what is unusual against it. Anomalies raise finding confidence; they are not alerts. */
+function Behaviour({ entity }: { entity: string }) {
+  const q = useXdr<{ profile: Row[]; anomalies: Row[] }>("entity.behaviour", { entity })
+  return (
+    <Panel
+      title="Behaviour vs baseline"
+      description="30-day profile of this entity and its peer group. Anomalies are signals: they raise the confidence of findings on this entity rather than alerting on their own."
+    >
+      <QueryState q={q}>
+        {(d) => {
+          const auth = d.profile.find((p) => p.metric === "auth")?.value as Row | undefined
+          const reads = d.profile.find((p) => p.metric === "reads")?.value as Row | undefined
+          const base = d.profile[0]
+          return (
+            <div className="space-y-3">
+              {base ? (
+                <div className="grid gap-2 text-sm md:grid-cols-4">
+                  <div><span className="text-muted-foreground">History </span>{base.days_seen} day(s)</div>
+                  <div><span className="text-muted-foreground">Peer group </span>{base.peer_group ?? "-"}</div>
+                  <div><span className="text-muted-foreground">Countries </span>{(auth?.countries as string[] | undefined)?.join(", ") ?? "-"}</div>
+                  <div><span className="text-muted-foreground">Usual hours </span>{(auth?.active_hours as number[] | undefined)?.join(", ") ?? "-"}</div>
+                  <div><span className="text-muted-foreground">Rows read / day </span>{reads ? fmtNum(reads.mean_rows) : "-"}</div>
+                </div>
+              ) : (
+                <Empty>No baseline yet: profiles need at least a few days of history for this entity.</Empty>
+              )}
+              {d.anomalies.length > 0 ? (
+                <DataTable
+                  rows={d.anomalies} rowKey="event_time" dense maxHeight={260}
+                  columns={[
+                    { key: "event_time", label: "When", render: (r) => fmtAgo(r.event_time) },
+                    { key: "kind", label: "Anomaly", render: (r) => <Pill tone={r.score >= 0.7 ? "critical" : r.score >= 0.5 ? "high" : "investigating"}>{KIND_LABEL[r.kind] ?? r.kind}</Pill> },
+                    { key: "score", label: "Score", align: "right", render: (r) => fmtNum(r.score, 2) },
+                    { key: "detail", label: "Why it is unusual", wrap: true },
+                  ]}
+                />
+              ) : base ? <div className="text-sm text-muted-foreground">Nothing unusual in the last 30 days.</div> : null}
+            </div>
+          )
+        }}
+      </QueryState>
+    </Panel>
   )
 }

@@ -4,7 +4,7 @@
  * 17_attack_graph.py and 2_threat_map.py.
  */
 
-import { rows, one, scalar, str, int, id, oneOf, InputError, normalizeTimestamp, type Row } from "@/lib/xdr"
+import { rows, one, scalar, str, int, id, oneOf, InputError, normalizeTimestamp, parseVariant, type Row } from "@/lib/xdr"
 import { entityKind, type LayoutNode, type LayoutEdge } from "@/lib/graph"
 
 // ---------------------------------------------------------------------------
@@ -142,6 +142,19 @@ export const entityHandlers = {
       FROM SNOWFLAKE_XDR.DETECTIONS.DETECTION_FINDINGS
       WHERE COALESCE(user_name, src, dest) IS NOT NULL
       GROUP BY 1 ORDER BY findings DESC LIMIT 12`),
+
+  /** UEBA (setup/47_ueba.sql): the entity's 30-day baseline and what is unusual against it. */
+  "entity.behaviour": async (p: Record<string, unknown>) => {
+    const e = entity(p)
+    const [profile, anomalies] = await Promise.all([
+      rows(`SELECT entity_type, metric, peer_group, value, sample_count, days_seen, built_at
+            FROM SNOWFLAKE_XDR.DETECTIONS.UEBA_PROFILES WHERE LOWER(entity) = LOWER(?) ORDER BY metric`, [e]),
+      rows(`SELECT kind, score, detail, method, event_time FROM SNOWFLAKE_XDR.DETECTIONS.UEBA_ANOMALIES
+            WHERE LOWER(entity) = LOWER(?) AND event_time > DATEADD('day', -30, CURRENT_TIMESTAMP())
+            ORDER BY event_time DESC LIMIT 50`, [e]),
+    ])
+    return { profile: profile.map((r) => ({ ...r, value: parseVariant(r.value) })), anomalies }
+  },
 }
 
 // ---------------------------------------------------------------------------

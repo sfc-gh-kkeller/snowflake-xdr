@@ -382,12 +382,17 @@ def investigate(s, iid):
                              AND _time > DATEADD('day', -2, CURRENT_TIMESTAMP()) ORDER BY _time DESC LIMIT 15""", [ent_json])
     facts = {"incident": {k: inc[k] for k in ("TITLE", "PRIORITY", "SEVERITY", "PRIMARY_ENTITY", "STATUS")},
              "findings": findings, "related_findings_7d": pivots, "blast_radius": blast,
-             "trust_center": tc, "intel": intel, "recent_database_activity": activity}
+             "trust_center": tc, "intel": intel, "recent_database_activity": activity,
+             # what is unusual for these entities against their own 30-day baseline (setup/47_ueba.sql)
+             "behaviour_anomalies": safe(lambda: rows(s, f"""SELECT entity, kind, score, detail, event_time
+                 FROM {DB}.DETECTIONS.UEBA_ANOMALIES
+                 WHERE LOWER(entity) IN (SELECT LOWER(value::VARCHAR) FROM TABLE(FLATTEN(PARSE_JSON(?))))
+                   AND event_time > DATEADD('day', -3, CURRENT_TIMESTAMP()) ORDER BY score DESC LIMIT 15""", [ent_json]), [])}
     model = (one(s, f"SELECT value::VARCHAR AS m FROM {DB}.DETECTIONS.AUTOPILOT_SETTINGS WHERE setting = 'model'")
              or {"M": "claude-sonnet-4-5"})["M"]
     prompt = ("You are a SOC analyst. Write an investigation note for this case using ONLY the facts below. "
               "Sections: What happened (timeline), Scope (entities, blast radius), Corroboration (Trust Center, intel, "
-              "related detections), Assessment (true positive likelihood and why), Recommended next steps. "
+              "related detections, behaviour anomalies vs the entity's own baseline), Assessment (true positive likelihood and why), Recommended next steps. "
               "Plain text, under 300 words, no speculation beyond the facts.\nFACTS:\n"
               + json.dumps(facts, default=str)[:24000])
     note = one(s, "SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS r", [model, prompt])["R"] or ""
