@@ -85,7 +85,7 @@ TACTICS = {
 SUPPORTED_MODS = {"contains", "startswith", "endswith", "all", "re", "cidr", "windash", "exists",
                   "gt", "gte", "lt", "lte", "cased", "i", "m", "s"}
 MAX_BRANCHES = 6
-COMPILER_VERSION = "2"   # bump when compiled SQL/fixtures change: forces re-import of every rule
+COMPILER_VERSION = "3"   # bump when compiled SQL/fixtures change: forces re-import of every rule
 MAX_SQL = 10000          # CUSTOM_RULES.CODE length
 
 
@@ -578,7 +578,8 @@ def synthesise(src, tree):
         if not evaluate(tree, cand):
             negative = cand
             break
-    out = {"positive": [{"table": src["table"], "row": r, "count": 1, "offset_minutes": 1} for r in positives]}
+    out = {"positive": [{"table": src["table"], "row": r, "count": 1, "offset_minutes": 1, "branch": i + 1}
+                         for i, r in enumerate(positives)]}
     if negative:
         out["negative"] = [{"table": src["table"], "row": negative, "count": 1, "offset_minutes": 1}]
     return out, len(branches)

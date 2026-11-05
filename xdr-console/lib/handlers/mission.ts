@@ -8,7 +8,7 @@
 import { rows, one, scalar, str, oneOf, bool, InputError, parseVariant, type Row } from "@/lib/xdr"
 
 const LEDGER_RE = /^[a-z_]+:[A-Za-z0-9_.|:-]{1,200}$/
-const ITEM_RE = /^(change|review|response|sla|ticket|canary):[A-Za-z0-9_.|-]{1,100}$/
+const ITEM_RE = /^(change|review|response|sla|ticket|canary|areview):[A-Za-z0-9_.|-]{1,100}$/
 const PACK_RE = /^[a-z][a-z0-9_]{1,40}$/
 const ACTOR_RE = /^[A-Za-z0-9_.@$-]{1,255}$/
 const WINDOWS = { "24h": 24, "7d": 168, "30d": 720 } as const
@@ -95,8 +95,26 @@ export const mission = {
       return ok(await scalar<Row>("CALL SNOWFLAKE_XDR.DASHBOARDS.UNDO_AI_ACTION(?, ?, ?)",
         [`ticket:${ref}`, "retry from Mission Control", who]), "retry failed")
     }
+    if (kind === "areview") {
+      const verdict = oneOf(p, "action", ["agree", "disagree"] as const)
+      return ok(await scalar<Row>("CALL SNOWFLAKE_XDR.DETECTIONS.DECIDE_AUTONOMY_REVIEW(?, ?, ?, ?)",
+        [ref, verdict, note || null, who], { long: true }), "review failed")
+    }
     throw new InputError(`${kind} items are handled on their own page`)
   },
+
+  /** Autonomy track record (setup/45_track_record.sql): weekly / monthly scorecard and per-type record. */
+  "mission.scorecard": async (p: Record<string, unknown>) => {
+    const grain = oneOf(p, "grain", ["week", "month"] as const, "week")
+    const [periods, byType] = await Promise.all([
+      rows(`SELECT * FROM SNOWFLAKE_XDR.DETECTIONS.V_AUTONOMY_SCORECARD WHERE grain = ? ORDER BY period_start DESC`, [grain]),
+      rows(`SELECT * FROM SNOWFLAKE_XDR.DETECTIONS.V_AUTONOMY_SCORECARD_BY_TYPE ORDER BY total DESC`),
+    ])
+    return { grain, periods, by_type: byType }
+  },
+
+  "mission.sampleReviews": async () =>
+    ok(await scalar<Row>("CALL SNOWFLAKE_XDR.DETECTIONS.SAMPLE_AUTONOMY_REVIEWS(5)", []), "sampling failed"),
 
   "mission.setAutonomy": async (p: Record<string, unknown>) => {
     const arg: Record<string, unknown> = { actor: actor(p), reason: str(p, "reason", { max: 1000 }) }

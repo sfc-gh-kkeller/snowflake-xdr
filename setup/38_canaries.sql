@@ -184,6 +184,16 @@ def landed(s, table, marker):
                    [marker.lower()] * cond.count("?"))["N"])
 
 
+def branch_ids(fx):
+    """Numbered branches among the positive fixtures (Sigma compiler / repaired rules); [] = one implicit branch."""
+    return sorted({int(x["branch"]) for x in (fx.get("positive") or []) if "branch" in x})
+
+
+def branch_marker(marker, x):
+    # 'z' terminates the number so branch 1's marker is not a substring of branch 10's
+    return f"{marker}b{int(x['branch'])}z" if "branch" in x else marker
+
+
 def run_one(s, cache, f, batch, candidate=None):
     """candidate: test another rule's code (an autopilot repair) against this rule's fixtures; nothing is recorded."""
     rid = f["RULE_ID"]
@@ -198,26 +208,34 @@ def run_one(s, cache, f, batch, candidate=None):
     detail, status, pos, neg, latency = {}, "error", False, False, None
     try:
         t0 = time.time()
+        branches = branch_ids(fx)
         for x in fx.get("positive") or []:
-            (inject_otel if x.get("otel") else lambda s_, x_, m_, t_: inject_table(s_, cache, x_, m_, t_))(s, x, pos_m, touched)
+            (inject_otel if x.get("otel") else lambda s_, x_, m_, t_: inject_table(s_, cache, x_, m_, t_))(
+                s, x, branch_marker(pos_m, x), touched)
         for x in fx.get("negative") or []:
             (inject_otel if x.get("otel") else lambda s_, x_, m_, t_: inject_table(s_, cache, x_, m_, t_))(s, x, neg_m, touched)
         if "OTEL" in touched:
             detail["mapping"] = str(list(one(s, f"CALL {DB}.REFERENCE.APPLY_CIM_MAPPINGS()").values())[0])[:300]
         need = max(1, int(rule["THRESHOLD_COUNT"] or 1))
         n_pos, n_neg = matches(s, rule, pos_m), matches(s, rule, neg_m)
+        # Branch coverage: with numbered branches, EVERY branch must fire on its own fixture
+        missed = [b for b in branches if matches(s, rule, f"{pos_m}b{b}z") < need]
         latency = round(time.time() - t0, 1)
-        pos, neg = n_pos >= need, n_neg >= need
+        pos, neg = n_pos >= need and not missed, n_neg >= need
         within = latency <= float(f["EXPECTED_LATENCY_SECONDS"] or 300)
         status = "pass" if pos and not neg and within else "fail"
-        arrived = landed(s, rule["SOURCE_TABLE"], pos_m) if not pos else None
+        arrived = landed(s, rule["SOURCE_TABLE"], pos_m) if n_pos < need else None
         detail.update({"positive_matches": n_pos, "needed": need, "negative_matches": n_neg,
+                       "branches": len(branches) or 1, "branches_fired": (len(branches) - len(missed)) if branches else int(n_pos >= need),
+                       "missed_branches": missed,
                        "fixture_rows_in_table": arrived,
                        "cause": ("parser" if arrived == 0 else "rule") if status != "pass" else None,
                        "message": ("ok" if status == "pass" else
                                    f"fixture never reached {rule['SOURCE_TABLE']}: the source's parser / CIM mapping "
                                    "is broken or paused, the rule itself may be fine" if arrived == 0 else
-                                   "positive fixture did not fire" if not pos else
+                                   "positive fixture did not fire" if n_pos < need else
+                                   f"branch(es) {missed} of {len(branches)} did not fire: the rule is narrower than its intent"
+                                   if missed else
                                    "negative fixture fired (false positive)" if neg else
                                    f"fired too slowly ({latency}s)")})
     except Exception as e:
@@ -313,28 +331,34 @@ def verify_pack(s, pack, batch):
                 t = str(x["table"]).upper()
                 if not TABLE_RE.match(t):
                     raise ValueError(f"bad table {t}")
+                mk = branch_marker(m, x) if kind == "positive" else m
                 for n in range(int(x.get("count", 1))):
-                    by_table.setdefault(t, []).append(fill(x.get("row") or {}, m, n))
-        plan.append((r, pos_m, neg_m, len(fx.get("positive") or [])))
+                    by_table.setdefault(t, []).append(fill(x.get("row") or {}, mk, n))
+        plan.append((r, pos_m, neg_m, len(fx.get("positive") or []), branch_ids(fx)))
     out = {"pass": 0, "fail": 0, "error": 0, "failures": []}
     try:
         for t, rs in by_table.items():
             bulk_insert(s, cache, t, rs)
             touched.add(t)
-        for r, pos_m, neg_m, n_pos_fx in plan:
+        for r, pos_m, neg_m, n_pos_fx, branches in plan:
             rule = {"CODE": r["CODE"], "LOOKBACK_MINUTES": r["LOOKBACK_MINUTES"]}
+            missed = []
             try:
                 need = max(1, int(r["THRESHOLD_COUNT"] or 1))
                 n_pos, n_neg = matches(s, rule, pos_m), matches(s, rule, neg_m)
-                status = "pass" if n_pos >= need and n_neg < need else "fail"
+                missed = [b for b in branches if matches(s, rule, f"{pos_m}b{b}z") < need]
+                status = "pass" if n_pos >= need and n_neg < need and not missed else "fail"
                 msg = ("ok" if status == "pass" else "positive fixture did not fire" if n_pos < need
+                       else f"branch(es) {missed} of {len(branches)} did not fire" if missed
                        else "negative fixture fired (false positive)")
             except Exception as e:
                 n_pos = n_neg = None
                 status, msg = "error", "rule error: " + str(e)[:300]
             out[status] += 1
             detail = {"mode": "preinstall", "message": msg, "positive_matches": n_pos, "negative_matches": n_neg,
-                      "positive_fixtures": n_pos_fx}
+                      "positive_fixtures": n_pos_fx, "branches": len(branches) or 1,
+                      "branches_fired": (len(branches) - len(missed)) if branches else int(status == "pass" or bool(n_pos)),
+                      "missed_branches": missed}
             if status != "pass" and len(out["failures"]) < 50:
                 out["failures"].append({"rule_id": r["RULE_ID"], "message": msg})
             s.sql(f"""UPDATE {DB}.REFERENCE.RULE_PACK_RULES SET verify_status = ?, verify_detail = PARSE_JSON(?),

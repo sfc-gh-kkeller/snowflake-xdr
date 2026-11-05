@@ -48,6 +48,8 @@ def test_one_positive_fixture_per_branch_and_a_negative():
     assert fx["negative"], "a must-not-fire fixture is synthesised"
     for p in fx["positive"]:
         assert p["row"]["user_name"] == "{{entity}}"
+    # Numbered branches: the canary requires every one of them to fire on its own
+    assert [p["branch"] for p in fx["positive"]] == list(range(1, len(fx["positive"]) + 1))
 
 
 def test_fixtures_agree_with_the_condition():

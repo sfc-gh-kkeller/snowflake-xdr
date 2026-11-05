@@ -52,6 +52,23 @@ describe("Mission Control handlers", () => {
     await expect(mission["mission.decide"]({ item_id: "other:1", action: "approve" })).rejects.toThrow(InputError)
   })
 
+  it("routes autonomy reviews and only allows agree / disagree", async () => {
+    vi.mocked(querySnowflakeLongRunning).mockResolvedValue(ok("Recorded"))
+    await mission["mission.decide"]({ item_id: "areview:r-9", action: "disagree", note: "too broad", __actor: "KELLER" })
+    const [sql, opts] = vi.mocked(querySnowflakeLongRunning).mock.calls[0]
+    expect(sql).toBe("CALL SNOWFLAKE_XDR.DETECTIONS.DECIDE_AUTONOMY_REVIEW(?, ?, ?, ?)")
+    expect((opts as { binds: unknown[] }).binds).toEqual(["r-9", "disagree", "too broad", "KELLER"])
+    await expect(mission["mission.decide"]({ item_id: "areview:r-9", action: "approve" })).rejects.toThrow(InputError)
+  })
+
+  it("scorecard grain is allowlisted and bound", async () => {
+    vi.mocked(querySnowflake).mockResolvedValue([])
+    const r = await mission["mission.scorecard"]({ grain: "month" })
+    expect(r.grain).toBe("month")
+    expect((vi.mocked(querySnowflake).mock.calls[0][1] as { binds: unknown[] }).binds).toEqual(["month"])
+    await expect(mission["mission.scorecard"]({ grain: "year" })).rejects.toThrow(InputError)
+  })
+
   it("surfaces a refused decision as an error", async () => {
     vi.mocked(querySnowflakeLongRunning).mockResolvedValueOnce([{ R: JSON.stringify({ ok: false, message: "cannot approve a change in status applied" }) }])
     await expect(mission["mission.decide"]({ item_id: "change:abc-1", action: "approve" })).rejects.toThrow(/cannot approve/)

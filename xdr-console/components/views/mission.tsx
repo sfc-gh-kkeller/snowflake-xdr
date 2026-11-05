@@ -10,15 +10,17 @@ import {
   Empty, JsonView, Disclosure, Drawer, Tabs, SeverityBadge,
 } from "@/components/xdr/kit"
 import { DataTable, type Column } from "@/components/xdr/data-table"
+import { Button } from "@/components/ui/button"
 
 const KIND_LABEL: Record<string, string> = {
   change_approval: "approve change", parser_approval: "approve parser", autonomy_promotion: "autonomy promotion",
   spot_check: "spot check", response_approval: "approve response", sla_breach: "SLA breach",
-  ticket_sync_failed: "ticket sync failed", canary_failing: "canary failing",
+  ticket_sync_failed: "ticket sync failed", canary_failing: "canary failing", autonomy_review: "review AI change",
 }
 const KIND_TONE: Record<string, string> = {
   response_approval: "critical", sla_breach: "high", canary_failing: "high", change_approval: "investigating",
   parser_approval: "investigating", autonomy_promotion: "investigating", spot_check: "contained", ticket_sync_failed: "dismissed",
+  autonomy_review: "contained",
 }
 const STATUS_TONE: Record<string, string> = {
   applied: "success", promoted: "success", approved: "success", done: "success", executed: "success", live: "success",
@@ -30,7 +32,7 @@ const WINDOWS = [{ value: "24h", label: "Last 24h" }, { value: "7d", label: "7 d
 const WHO = [{ value: "machine", label: "AI and automation" }, { value: "human", label: "People" }, { value: "all", label: "Everyone" }] as const
 const ACTION_LABEL: Record<string, string> = {
   approve: "Approve", reject: "Reject", true_positive: "True positive", false_positive: "False positive", benign: "Benign",
-  retry: "Retry",
+  retry: "Retry", agree: "Agree", disagree: "Disagree",
 }
 
 export function Mission() {
@@ -72,6 +74,7 @@ export function Mission() {
       <RulePacks />
       <SigmaPanel />
       <Verification />
+      <Scorecard />
       <Guardrails status={s} />
       <Briefing />
     </div>
@@ -454,6 +457,69 @@ function ThreatPanel() {
 }
 
 const VERIFY_TONE: Record<string, string> = { verified: "success", failing: "critical", untested: "investigating", no_fixture: "dismissed" }
+
+const pct = (v: unknown) => (v === null || v === undefined ? "-" : `${fmtNum(Number(v) * 100, 0)}%`)
+
+function Scorecard() {
+  const [grain, setGrain] = useState<"week" | "month">("week")
+  const q = useXdr<Row>("mission.scorecard", { grain }, { refetchInterval: 300_000 })
+  const sample = useXdrAction("mission.sampleReviews", { invalidate: ["mission."] })
+  const cols: Column[] = [
+    { key: "period_start", label: grain === "week" ? "Week of" : "Month", className: "font-mono text-xs" },
+    { key: "changes", label: "Changes", align: "right" },
+    { key: "went_live_unattended", label: "Live unattended", align: "right" },
+    { key: "approved_by_human", label: "Approved", align: "right" },
+    { key: "rejected_by_human", label: "Rejected", align: "right" },
+    { key: "reversal_rate", label: "Reversed", align: "right", render: (r) => pct(r.reversal_rate) },
+    { key: "canary_pass_rate", label: "Canary pass", align: "right", render: (r) => pct(r.canary_pass_rate) },
+    { key: "branch_coverage", label: "Branches fired", align: "right", render: (r) => pct(r.branch_coverage) },
+    { key: "ai_rule_precision", label: "AI rule precision", align: "right",
+      render: (r) => r.ai_verdicts ? `${pct(r.ai_rule_precision)} (${r.ai_verdicts})` : "-" },
+    { key: "pack_rule_precision", label: "Pack precision", align: "right",
+      render: (r) => r.pack_verdicts ? `${pct(r.pack_rule_precision)} (${r.pack_verdicts})` : "-" },
+    { key: "median_detect_minutes", label: "MTTD (min)", align: "right" },
+    { key: "median_contain_hours", label: "MTTC (h)", align: "right" },
+    { key: "reviewer_agreement", label: "Reviewer agreed", align: "right",
+      render: (r) => (r.reviews_agreed + r.reviews_disagreed) ? `${pct(r.reviewer_agreement)} of ${r.reviews_agreed + r.reviews_disagreed}` : "-" },
+  ]
+  return (
+    <Panel
+      title="Autonomy track record"
+      description="What the AI changed, how much went live without a human, how often a guardrail or a person reversed it, and how good its rules are by analyst verdict. Each week a random sample of unattended changes lands in Needs you for a quick agree / disagree."
+      actions={
+        <div className="flex gap-2 print:hidden">
+          <Button size="sm" variant={grain === "week" ? "default" : "ghost"} onClick={() => setGrain("week")}>Weekly</Button>
+          <Button size="sm" variant={grain === "month" ? "default" : "ghost"} onClick={() => setGrain("month")}>Monthly</Button>
+          <ActionButton action={sample} params={{}} variant="ghost">Sample changes for review</ActionButton>
+          <Button size="sm" variant="ghost" onClick={() => window.print()}>Print / PDF</Button>
+        </div>
+      }
+    >
+      <ActionResult action={sample} />
+      <QueryState q={q}>
+        {(d) => (
+          <div className="space-y-3">
+            <DataTable rows={(d.periods as Row[]) ?? []} columns={cols} rowKey="period_start" dense />
+            <Disclosure title="By change type (90 days)">
+              <DataTable dense rowKey="change_type" rows={(d.by_type as Row[]) ?? []} columns={[
+                { key: "change_type", label: "Type", className: "font-mono text-xs" },
+                { key: "mode", label: "Mode" },
+                { key: "total", label: "Total", align: "right" },
+                { key: "automatic_live", label: "Unattended", align: "right" },
+                { key: "approvals", label: "Approved", align: "right" },
+                { key: "rejections", label: "Rejected", align: "right" },
+                { key: "rollbacks", label: "Rolled back", align: "right" },
+                { key: "canary_pass_rate", label: "Canary", align: "right", render: (r) => pct(r.canary_pass_rate) },
+                { key: "precision", label: "Precision", align: "right", render: (r) => r.verdicts ? `${pct(r.precision)} (${r.verdicts})` : "-" },
+                { key: "reviews_agreed", label: "Reviews +/-", align: "right", render: (r) => `${r.reviews_agreed}/${r.reviews_disagreed}` },
+              ]} />
+            </Disclosure>
+          </div>
+        )}
+      </QueryState>
+    </Panel>
+  )
+}
 
 function Verification() {
   const can = useXdr<Row[]>("mission.canaries", {}, { refetchInterval: 120_000 })

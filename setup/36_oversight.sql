@@ -139,6 +139,12 @@ FROM SNOWFLAKE_XDR.DETECTIONS.AUTONOMY_AUDIT g;
 -- 3. Needs a human: one ranked queue
 --    score = urgency (kind) + severity x 10 + age bonus (max 20)
 -- ---------------------------------------------------------------------------
+-- Owned by setup/45_track_record.sql; created here too because the queue reads it
+CREATE TABLE IF NOT EXISTS SNOWFLAKE_XDR.DETECTIONS.AUTONOMY_REVIEWS (
+    review_id VARCHAR DEFAULT UUID_STRING() PRIMARY KEY, change_id VARCHAR, change_type VARCHAR(40),
+    title VARCHAR(500), sampled_at TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(), status VARCHAR(20),
+    reviewer VARCHAR(255), note VARCHAR(2000), decided_at TIMESTAMP_LTZ);
+
 CREATE OR REPLACE VIEW SNOWFLAKE_XDR.DASHBOARDS.V_NEEDS_HUMAN AS
 WITH items AS (
     SELECT 'change:' || c.change_id AS item_id, IFF(c.change_type = 'autonomy_promotion', 'autonomy_promotion',
@@ -187,6 +193,14 @@ WITH items AS (
           QUALIFY ROW_NUMBER() OVER (PARTITION BY rule_id ORDER BY run_at DESC) = 1) k
     LEFT JOIN SNOWFLAKE_XDR.DETECTIONS.CUSTOM_RULES r ON r.rule_id = k.rule_id
     WHERE k.status IN ('fail', 'error')
+    UNION ALL
+    -- Weekly random sample of unattended autopilot changes (setup/45_track_record.sql)
+    SELECT 'areview:' || v.review_id, 'autonomy_review', 'Would you have made this change? ' || COALESCE(v.title, ''),
+           'The autopilot made this ' || REPLACE(v.change_type, '_', ' ') || ' change without a human. '
+               || 'Disagreeing costs that change type a rung of autonomy.',
+           2, v.sampled_at, 20, v.review_id, ARRAY_CONSTRUCT('agree', 'disagree'), '/autopilot', v.change_type
+    FROM SNOWFLAKE_XDR.DETECTIONS.AUTONOMY_REVIEWS v
+    WHERE v.status = 'open'
 )
 SELECT i.*, i.urgency + i.severity * 10
             + LEAST(20, GREATEST(0, DATEDIFF('hour', i.created_at, CURRENT_TIMESTAMP()))) AS score
@@ -403,6 +417,15 @@ def main(s, P_TO, P_SEND):
         lines += ["", f"Trust Center: {tc['N']} new finding(s), e.g. {tc['EXAMPLE']}"]
     if exposure:
         lines += ["", "Exposure news:"] + [f"  - {e['TITLE']}: {e['DETAIL']}" for e in exposure]
+    try:  # weekly track record, from setup/45_track_record.sql when deployed
+        w = rows(s, f"""SELECT * FROM {DB}.DETECTIONS.V_AUTONOMY_SCORECARD WHERE grain = 'week'
+                        ORDER BY period_start DESC LIMIT 1""")[0]
+        pct = lambda v: "-" if v is None else f"{float(v) * 100:.0f}%"  # noqa: E731
+        lines += ["", f"Track record this week: {w['CHANGES']} changes, {w['WENT_LIVE_UNATTENDED']} live unattended, "
+                      f"reversed {pct(w['REVERSAL_RATE'])}, canaries passing {pct(w['CANARY_PASS_RATE'])}, "
+                      f"reviewer agreement {pct(w['REVIEWER_AGREEMENT'])}"]
+    except Exception:
+        pass
     body = "\n".join(lines)
     subject = f"XDR briefing: {n_needs} item(s) need you" + (" - AUTONOMY PAUSED" if status["PAUSED"] else "")
 
