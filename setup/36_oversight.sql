@@ -336,7 +336,7 @@ def main(s, P_LEDGER_ID, P_REASON, P_ACTOR):
                   WHERE op_id = ? AND status = 'failed'""", params=[ref]).collect()
         return {"ok": True, "message": "ticket operation re-queued; it will be retried on the next sync"}
     if source == "response":
-        r = val(s.sql(f"CALL {DB}.INCIDENTS.UNDO_RESPONSE_ACTION(?, ?)", params=[ref, actor]).collect())
+        r = val(s.sql(f"CALL {DB}.INCIDENTS.UNDO_ANY_RESPONSE(?, ?)", params=[ref, actor]).collect())
         return {"ok": bool(r.get("ok")), "message": r.get("message")}
     return {"ok": False, "message": f"no undo for {source} entries"}
 $$;

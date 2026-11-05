@@ -199,6 +199,7 @@ done
 sql_file "setup/41_sigma.sql"
 sql_file "setup/42_detection_as_code.sql"
 sql_file "setup/43_edr_email.sql"
+sql_file "setup/44_response_connectors.sql"
 
 # Response channels: substitute the Slack token (only used if the secret is new)
 CHANNELS_SQL="$(mktemp -t xdr_channels.XXXXXX).sql"

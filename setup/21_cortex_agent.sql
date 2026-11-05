@@ -105,9 +105,12 @@ instructions:
       cite ledger_ids. "Undo / roll back that" -> undo_action with the exact ledger_id (only entries whose undo is set).
     - "What needs me / what is waiting for a human / what should I approve" -> needs_human. You never approve
       changes or response actions yourself: point the user to Mission Control (the home page).
-    - Containing a compromised Snowflake user -> request_response with action contain_snowflake_user. It only
-      queues the request; a human approves it in Mission Control. Only allowlisted users can be contained, and
-      containment removes roles (to PUBLIC) without disabling the user. Say so.
+    - Containing a compromised account or host -> request_response. Snowflake users: contain_snowflake_user
+      (roles to PUBLIC, not disabled). Okta/Entra users: okta_suspend_user, okta_clear_sessions, entra_disable_user,
+      entra_revoke_sessions. Hosts: crowdstrike_contain_host, defender_isolate_host, sentinelone_isolate_host (match
+      the EDR the host reports through). Indicators: block_ioc (runs automatically, reversible). Everything except
+      block_ioc only queues the request; a human approves it in Mission Control. Only allowlisted targets can be
+      acted on, and the EDR / identity connectors run in demo mode (request built and logged, not sent). Say so.
     - Recording a spot-check verdict -> decide_spot_check with the exact review_id. A true_positive
       verdict revokes the suppression and re-opens what it hid; say so.
   sample_questions:
@@ -436,16 +439,16 @@ tools:
   - tool_spec:
       type: "generic"
       name: "request_response"
-      description: "ACTION (request only). Ask for a response action on a case. contain_snowflake_user (strip an allowlisted Snowflake user's roles to PUBLIC) waits for human approval; recommendation-only actions (disable_snowflake_user, revoke_user_credentials) are recorded as advice."
+      description: "ACTION (request only). Ask for a response action on a case. block_ioc runs automatically (reversible); every other action waits for human approval in Mission Control. Recommendation-only actions (disable_snowflake_user, revoke_user_credentials) are recorded as advice."
       input_schema:
         type: object
         properties:
           p_action:
             type: string
-            description: "contain_snowflake_user | disable_snowflake_user | revoke_user_credentials"
+            description: "contain_snowflake_user | okta_suspend_user | okta_clear_sessions | entra_disable_user | entra_revoke_sessions | crowdstrike_contain_host | defender_isolate_host | sentinelone_isolate_host | block_ioc | disable_snowflake_user | revoke_user_credentials"
           p_target:
             type: string
-            description: "Snowflake user name"
+            description: "Snowflake user, user@domain for Okta/Entra, host name for EDR actions, or an IP / domain / hash for block_ioc"
           p_incident_id:
             type: string
             description: "Exact incident_id, or empty"

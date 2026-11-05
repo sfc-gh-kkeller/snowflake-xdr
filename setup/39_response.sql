@@ -318,6 +318,7 @@ HANDLER = 'main'
 EXECUTE AS CALLER
 AS
 $$
+import ipaddress
 import json
 
 DB = "SNOWFLAKE_XDR"
@@ -338,6 +339,13 @@ def safe(fn, default):
         return fn()
     except Exception as e:
         return {"unavailable": str(e)[:150]} if default is None else default
+
+
+def public_ip(v):
+    try:
+        return ipaddress.ip_address(str(v).strip()).is_global
+    except ValueError:
+        return False
 
 
 def investigate(s, iid):
@@ -392,10 +400,22 @@ def investigate(s, iid):
                                           "trust_center": len(tc), "intel_hits": len(intel)}, default=str)]).collect()
     report = safe(lambda: list(one(s, f"CALL {DB}.INCIDENTS.GENERATE_INCIDENT_REPORT(?, ?)", [iid, AGENT]).values())[0], None)
     requested = []
+    # Playbook (V_RESPONSE_OPTIONS, setup/44): the right action for each allowlisted entity - Snowflake user,
+    # Okta/Entra identity (matched on the full address or its local part) or EDR host - and an automatic,
+    # reversible IOC block for public attacker IPs seen in the findings
     for e in ents:
-        if one(s, f"SELECT 1 AS x FROM {DB}.INCIDENTS.RESPONSE_TARGET_ALLOWLIST WHERE UPPER(user_name) = UPPER(?)", [e]):
-            r = one(s, f"CALL {DB}.INCIDENTS.REQUEST_RESPONSE_ACTION('contain_snowflake_user', ?, ?, ?, ?, 'agent')",
-                    [e.upper(), iid, f"Auto-investigation of {inc['PRIORITY']} case: {inc['TITLE']}"[:500], AGENT])
+        opt = safe(lambda: one(s, f"""SELECT action_id, target FROM {DB}.INCIDENTS.V_RESPONSE_OPTIONS
+                                      WHERE action_id IS NOT NULL AND (UPPER(target) = UPPER(?)
+                                         OR (target_kind = 'user' AND UPPER(SPLIT_PART(target, '@', 1)) = UPPER(?)))
+                                      LIMIT 1""", [e, e]), None)
+        if opt and opt.get("ACTION_ID"):
+            r = one(s, f"CALL {DB}.INCIDENTS.REQUEST_RESPONSE_ACTION(?, ?, ?, ?, ?, 'agent')",
+                    [opt["ACTION_ID"], opt["TARGET"], iid, f"Auto-investigation of {inc['PRIORITY']} case: {inc['TITLE']}"[:500], AGENT])
+            requested.append(json.loads(list(r.values())[0]))
+    for ip in sorted({f["SRC"] for f in findings if f["SRC"]} | {f["DEST"] for f in findings if f["DEST"]}):
+        if public_ip(ip) and any(str(i["IOC_VALUE"]) == ip for i in intel):
+            r = one(s, f"CALL {DB}.INCIDENTS.REQUEST_RESPONSE_ACTION('block_ioc', ?, ?, ?, ?, 'agent')",
+                    [ip, iid, "Known-bad IP in this case (threat intel match)", AGENT])
             requested.append(json.loads(list(r.values())[0]))
     return {"ok": True, "incident_id": iid, "entities": ents, "findings": len(findings), "related": len(pivots),
             "trust_center": len(tc), "intel": len(intel), "report": bool(report), "response_requests": requested,
