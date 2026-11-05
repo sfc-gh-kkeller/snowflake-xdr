@@ -494,6 +494,103 @@ CALL SNOWFLAKE_XDR.INCIDENTS.AUTO_INVESTIGATE('new');   -- note, report, contain
 -- approve in Mission Control -> SHOW GRANTS TO USER XDR_DEMO_COMPROMISED shows no roles; Undo restores them
 ```
 
+## Coverage, response breadth and proof (Phase 5)
+
+### Sigma, compiled and verified (`sigma/`, `setup/41_sigma.sql`)
+
+`sigma/sigma_compiler.py` turns SigmaHQ rules into Snowflake SQL with no AI involved: logsources map to
+CIM tables, field modifiers to `ILIKE` / `REGEXP_LIKE` / `ARRAY_CONTAINS`, and conditions to
+disjunctive normal form. From that form it synthesises one positive fixture per branch and a negative
+that breaks one atom. `SIGMA_IMPORT('stage')` loads the vendored copy (`rule-packs/sigma/`, 1,089
+rules: 971 endpoint, 59 network, 59 cloud); `SIGMA_IMPORT('github')` (weekly task) syncs the latest
+release. Every rule runs its fixtures before it is offered (`RUN_CANARIES('verify:<pack>')`), and a rule
+that fails is never installed. All 3,802 branches currently fire.
+
+```bash
+scripts/sync_sigma.sh            # vendor + import + verify;  --refresh pulls a new release first
+python3 -m pytest sigma           # needs pyyaml + pytest
+```
+
+Canaries are branch-level: each numbered positive fixture must fire on its own, so a rule or an
+AI repair that drops a branch fails ("branch [2] of 2 did not fire") instead of passing.
+
+### Detection-as-code (`setup/42_detection_as_code.sql`, `detections/`, `.github/workflows/detections.yml`)
+
+`scripts/export_rules.py export` writes custom rules to YAML; on a pull request CI runs
+`CI_VERIFY_RULES` (lint, compile, canaries in a scratch pack, nothing left behind), and on merge
+`APPLY_RULES_FROM_GIT` applies them as ledgered `git_rule` changes (shadow first, undoable).
+
+### EDR and email (`setup/43_edr_email.sql`)
+
+CrowdStrike FDR / Event Streams, Defender Advanced Hunting, SentinelOne Cloud Funnel, Microsoft 365
+message trace and audit, and Proofpoint TAP map into the shared endpoint, network, DNS, file, IDS
+and new `EMAIL_ACTIVITY` tables, so the EDR packs, Sigma and the built-in rules work on any EDR.
+Packs `crowdstrike`, `defender`, `sentinelone` (9 rules each) and `email` (5) are canary-verified
+end to end through OTLP; forwarders are in `otel-receiver/collector-examples/`.
+
+### Response connectors (`setup/44_response_connectors.sql`)
+
+| Action | System | Autonomy | Undo |
+|---|---|---|---|
+| `okta_suspend_user`, `okta_clear_sessions` | Okta | approval | unsuspend / none |
+| `entra_disable_user`, `entra_revoke_sessions` | Entra ID | approval | re-enable / none |
+| `crowdstrike_contain_host`, `defender_isolate_host`, `sentinelone_isolate_host` | EDR | approval | lift containment |
+| `block_ioc` | XDR blocklist | automatic | remove |
+
+One owner's-rights executor applies the same guards as `contain_snowflake_user`: allowlist by
+target kind, human approval, never the caller, public IOCs only, and the kill switch. Connectors ship in
+**demo mode**: the real vendor API calls are built and stored on the run, and the effect is applied
+to `RESPONSE_DEMO_STATE`. Live mode needs an external access integration and a secret per
+connector; it is not exercised by this build. Auto-investigation picks the action that fits each
+entity: the EDR the host reports through, and the IdP the user signs in with.
+
+```sql
+CALL SNOWFLAKE_XDR.INCIDENTS.SEED_EDR_DEMO();          -- CrowdStrike story on WS-DEMO-01 -> P1 case
+CALL SNOWFLAKE_XDR.INCIDENTS.AUTO_INVESTIGATE('<id>');  -- requests host containment + Okta suspend
+```
+
+### Track record (`setup/45_track_record.sql`)
+
+`V_AUTONOMY_SCORECARD` (weekly / monthly, Mission Control and the briefing): changes, unattended
+go-lives, approvals, reversals, canary pass rate, branch coverage, MTTD / MTTC, AI-authored vs pack
+rule precision by analyst verdict, and reviewer agreement. Every Monday 5 unattended changes are
+sampled into Needs-you ("would you have made this change?"); disagreeing demotes that change type a
+rung.
+
+### Near-real-time lane (`setup/46_realtime.sql`)
+
+`RAW_LOGS.HOT_EDR_ALERTS` is an incremental dynamic table (1-minute lag) over `OTEL_LOGS`. A
+serverless triggered task on a stream over `OTEL_LOGS` refreshes it as data lands and runs the FAST
+rule class (`RT-001` plus high-severity EDR and critical Sigma rules). `RUN_FAST_LANE_PROBE()`
+(every 6 h) sends a real OTLP alert and records the result as RT-001's canary. It currently measures
+**12-22 s from ingest to finding** against a 120 s SLO; the batch path takes about 6 minutes.
+`V_DETECTION_LATENCY` shows median and p95 per rule.
+
+### Behaviour baselines (`setup/47_ueba.sql`)
+
+30-day profiles per user, host and role (countries, addresses, active hours, rows read, process
+lineage, cloud actions). Anomalies are explained signals, not alerts: they add a capped "behaviour
+anomaly" factor to the calibrated confidence and feed auto-investigation and Entity 360. Each kind
+has a minimum history (cold start). Entities with 14+ active days also get a Cortex ML
+`ANOMALY_DETECTION` model (`RUN_UEBA_ML('selftest')` proves the integration).
+`SEED_UEBA_DEMO()`: an analyst with 12 normal days signs in from a new country and reads 1.5M rows.
+SF-006 fires, and its confidence rises from 30% to 66% with every reason listed.
+
+### Enterprise basics and threat intel (`setup/48_enterprise.sql`)
+
+- **Console RBAC**: viewer < analyst < engineer < admin, resolved per signed-in user
+  (`CONSOLE_USERS`, else `CONSOLE_ROLE_MAP` from Snowflake roles; unknown = viewer) and enforced at
+  the single API dispatch point (`lib/rbac.ts`). A test fails if a write handler is unclassified.
+  Approving containment needs admin; anyone on shift can pause autonomy, but only an admin resumes it.
+- **Tenancy (demo)**: `tenant_id` and one row access policy on findings, cases and CIM tables;
+  roles in `TENANT_ROLE_MAP` see only their tenants (try `XDR_TENANT_ACME`).
+- **Compliance evidence**: SOC 2, ISO 27001:2022 and NIST CSF 2.0 controls, each scored from live
+  data (`V_COMPLIANCE_REPORT`, Security Posture page). This is evidence for an audit, not a certification.
+- **Retention**: `RETENTION_POLICY` hot / archive days, `APPLY_RETENTION(TRUE)` dry-runs. Iceberg
+  needs an external volume (none in the demo account).
+- **STIX / TAXII 2.1** (`SYNC_TAXII`, `TAXII_SERVERS`), plus the existing abuse.ch feeds;
+  `RETRO_HUNT_IOCS` searches 30 days of telemetry for indicators learned recently.
+
 ## Splunk DB Connect Integration
 
 The schema uses Splunk CIM field names natively. To query from Splunk:
