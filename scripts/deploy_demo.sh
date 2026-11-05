@@ -203,6 +203,7 @@ sql_file "setup/44_response_connectors.sql"
 sql_file "setup/45_track_record.sql"
 sql_file "setup/46_realtime.sql"
 sql_file "setup/47_ueba.sql"
+sql_file "setup/48_enterprise.sql"
 
 # Response channels: substitute the Slack token (only used if the secret is new)
 CHANNELS_SQL="$(mktemp -t xdr_channels.XXXXXX).sql"

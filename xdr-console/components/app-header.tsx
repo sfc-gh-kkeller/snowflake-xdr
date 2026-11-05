@@ -1,6 +1,7 @@
 import Image from "next/image"
 import { APP_TITLE, LOGO_SRC } from "@/lib/constants"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { WhoAmI } from "@/components/who-am-i"
 
 /** Top navigation bar. Title and logo come from lib/constants.ts. */
 export function AppHeader() {
@@ -14,7 +15,8 @@ export function AppHeader() {
         <span className="hidden rounded border border-white/20 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-slate-300 sm:inline">
           Snowflake XDR
         </span>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-3">
+          <WhoAmI />
           <ThemeToggle />
         </div>
       </div>

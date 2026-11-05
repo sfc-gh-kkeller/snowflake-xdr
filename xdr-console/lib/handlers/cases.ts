@@ -6,6 +6,7 @@
  */
 
 import { rows, scalar, str, int, id, oneOf, InputError, parseVariant, type Row } from "@/lib/xdr"
+import { tenantClause } from "@/lib/rbac"
 
 const STATES = ["open", "acknowledged", "investigating", "contained", "eradicated", "recovered", "closed"] as const
 const RESOLUTIONS = ["true_positive", "benign", "false_positive", "duplicate", "test"] as const
@@ -37,12 +38,15 @@ async function call(sql: string, binds: (string | number | boolean | null)[], lo
 export const cases = {
   "cases.list": async (p: Record<string, unknown>) => {
     const filter = oneOf(p, "filter", FILTERS, "active")
-    const where = {
-      active: "WHERE i.status <> 'closed'",
+    const base = {
+      active: "i.status <> 'closed'",
       all: "",
-      closed: "WHERE i.status = 'closed'",
-      breached: "WHERE i.status <> 'closed' AND (s.ack_breached OR s.contain_breached OR s.resolve_breached)",
+      closed: "i.status = 'closed'",
+      breached: "i.status <> 'closed' AND (s.ack_breached OR s.contain_breached OR s.resolve_breached)",
     }[filter]
+    const tenant = tenantClause(p, "i.tenant_id")
+    const conds = [base, tenant?.sql].filter(Boolean)
+    const where = conds.length ? `WHERE ${conds.join(" AND ")}` : ""
     const list = await rows(`
       SELECT i.incident_id, i.title, i.priority, i.severity, i.status, i.assignee, i.resolution, i.created_at,
              i.updated_at, i.last_seen, s.next_milestone, s.next_due_at,
@@ -56,7 +60,7 @@ export const cases = {
       LEFT JOIN SNOWFLAKE_XDR.INCIDENTS.V_INCIDENT_SLA s ON s.incident_id = i.incident_id
       ${where}
       ORDER BY IFF(i.status = 'closed', 1, 0), i.priority, s.next_due_at NULLS LAST
-      LIMIT 300`)
+      LIMIT 300`, tenant?.binds ?? [])
     return list.map((r) => ({ ...r, tickets: parseVariant(r.tickets) ?? [] }))
   },
 

@@ -8,6 +8,7 @@ import {
   rows, one, scalar, str, int, oneOf, listOf, id, ids, placeholders, parseVariant,
   InputError, type Binds,
 } from "@/lib/xdr"
+import { tenantClause } from "@/lib/rbac"
 
 export const STATUSES = ["new", "investigating", "contained", "resolved", "dismissed"] as const
 export const CATEGORIES = ["identity", "endpoint", "network", "cloud", "application", "custom"] as const
@@ -61,6 +62,11 @@ export function buildTriageFilter(p: Record<string, unknown>): { where: string; 
     clauses.push("(LOWER(COALESCE(f.user_name, f.src, f.dest, '')) LIKE ? OR LOWER(f.description) LIKE ?)")
     const like = `%${search.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
     binds.push(like, like)
+  }
+  const tenant = tenantClause(p, "f.tenant_id")
+  if (tenant) {
+    clauses.push(tenant.sql)
+    binds.push(...tenant.binds)
   }
   return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", binds }
 }

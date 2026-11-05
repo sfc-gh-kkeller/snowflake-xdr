@@ -2,7 +2,7 @@
 
 import { useXdr, useXdrAction, type Row } from "@/lib/client"
 import { fmtNum, fmtDay, fmtPct } from "@/lib/format"
-import { PageHeader, Panel, QueryState, Kpi, AiTextPanel, Empty } from "@/components/xdr/kit"
+import { PageHeader, Panel, QueryState, Kpi, AiTextPanel, Empty, Pill } from "@/components/xdr/kit"
 import { DataTable } from "@/components/xdr/data-table"
 import { TrendArea } from "@/components/xdr/charts"
 import { cn } from "@/lib/utils"
@@ -115,6 +115,59 @@ export function Posture() {
         <Kpi label="Active custom rules" value={fmtNum(p.active_custom_rules)} />
         <Kpi label="Active controls" value={fmtNum(p.active_controls)} />
       </div>
+
+      <Compliance />
     </div>
+  )
+}
+
+const CONTROL_TONE: Record<string, string> = { evidenced: "success", partial: "investigating", "no evidence": "critical" }
+
+/** Controls evidenced by live platform data, plus retention tiers and TAXII feeds (setup/48_enterprise.sql). */
+function Compliance() {
+  const q = useXdr<{ controls: Row[]; retention: Row[]; taxii: Row[] }>("posture.compliance")
+  return (
+    <Panel
+      title="Compliance evidence"
+      description="SOC 2, ISO/IEC 27001:2022 and NIST CSF 2.0 controls, each backed by what the platform actually did (canary-verified rules, human verdicts, response runs, ledgered changes). Evidence for an audit, not a certification."
+    >
+      <QueryState q={q}>
+        {(d) => (
+          <div className="space-y-3">
+            <DataTable
+              rows={d.controls} rowKey="control_id" dense maxHeight={420}
+              columns={[
+                { key: "framework", label: "Framework" },
+                { key: "control_id", label: "Control", className: "font-mono text-xs" },
+                { key: "title", label: "Requirement", wrap: true },
+                { key: "status", label: "Status", render: (r) => <Pill tone={CONTROL_TONE[r.status]}>{r.status}</Pill> },
+                { key: "detail", label: "Evidence", wrap: true, render: (r) => <span className="text-xs text-muted-foreground">{r.detail}</span> },
+              ]}
+            />
+            <div className="grid gap-3 md:grid-cols-2">
+              <DataTable
+                rows={d.retention} rowKey="table_name" dense
+                columns={[
+                  { key: "table_name", label: "Retention: table", className: "font-mono text-xs" },
+                  { key: "hot_days", label: "Hot (days)", align: "right" },
+                  { key: "cold_days", label: "Archive (days)", align: "right" },
+                  { key: "cold_format", label: "Cold tier" },
+                ]}
+              />
+              <DataTable
+                rows={d.taxii} rowKey="server_id" dense
+                columns={[
+                  { key: "name", label: "TAXII 2.1 server", wrap: true },
+                  { key: "last_status", label: "Last pull", render: (r) => r.last_status
+                      ? <Pill tone={r.last_status === "ok" ? "success" : r.last_status === "partial" ? "investigating" : "critical"}>{r.last_status}</Pill> : "never" },
+                  { key: "last_count", label: "Indicators", align: "right" },
+                  { key: "last_error", label: "Note", wrap: true, render: (r) => <span className="text-xs text-muted-foreground">{r.last_error ?? ""}</span> },
+                ]}
+              />
+            </div>
+          </div>
+        )}
+      </QueryState>
+    </Panel>
   )
 }

@@ -327,6 +327,18 @@ export const response = {
 export const posture = {
   "posture.metrics": async () => one("SELECT * FROM SNOWFLAKE_XDR.DETECTIONS.V_POSTURE_METRICS"),
 
+  /** Compliance evidence (setup/48_enterprise.sql): SOC 2 / ISO 27001 / NIST CSF controls, retention, TAXII. */
+  "posture.compliance": async () => {
+    const [controls, retention, taxii] = await Promise.all([
+      rows(`SELECT framework, control_id, title, status, detail FROM SNOWFLAKE_XDR.REFERENCE.V_COMPLIANCE_REPORT
+            ORDER BY framework, control_id`),
+      rows(`SELECT table_name, hot_days, cold_days, cold_format FROM SNOWFLAKE_XDR.REFERENCE.RETENTION_POLICY ORDER BY 1`),
+      rows(`SELECT server_id, name, api_root, enabled, last_run_at, last_status, last_count, LEFT(last_error, 200) AS last_error
+            FROM SNOWFLAKE_XDR.REFERENCE.TAXII_SERVERS ORDER BY 1`),
+    ])
+    return { controls, retention, taxii }
+  },
+
   /** Verified (canary-proven) coverage, setup/38_canaries.sql, against the threat profile (37). */
   "posture.verified": async () =>
     one(`

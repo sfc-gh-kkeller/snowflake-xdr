@@ -8,6 +8,8 @@
 
 import { getHandler } from "@/lib/handlers"
 import { InputError } from "@/lib/xdr"
+import { atLeast, requiredRole } from "@/lib/rbac"
+import { resolveIdentity } from "@/lib/identity"
 
 export const dynamic = "force-dynamic"
 // AI calls (agent, briefings, campaign stories) can take a minute or more
@@ -15,7 +17,7 @@ export const maxDuration = 300
 
 export async function POST(request: Request, ctx: { params: Promise<{ name: string }> }) {
   const { name } = await ctx.params
-  const handler = getHandler(name)
+  const handler = name === "me" ? async () => null : getHandler(name)
   if (!handler) {
     return Response.json({ error: `Unknown operation: ${name}` }, { status: 404 })
   }
@@ -36,6 +38,18 @@ export async function POST(request: Request, ctx: { params: Promise<{ name: stri
   // Signed-in Snowflake user, set by the SPCS ingress; used for audit trails.
   // Always overwrite so a client cannot supply its own value.
   params.__actor = request.headers.get("sf-context-current-user") ?? ""
+
+  // RBAC (lib/rbac.ts): every write handler needs a minimum XDR role
+  const id = await resolveIdentity(String(params.__actor))
+  params.__role = id.role
+  params.__tenants = id.tenants   // null = all tenants; lists are scoped to these (lib/rbac.ts tenantClause)
+  if (name === "me") return Response.json({ data: id })
+  const need = requiredRole(name, params)
+  if (need && !atLeast(id.role, need)) {
+    console.warn(`[xdr] denied ${name} for ${id.user || "anonymous"} (${id.role}, needs ${need})`)
+    return Response.json({ error: `This needs the ${need} role; you are ${id.role} (${id.via}). Ask an XDR admin.` },
+                         { status: 403 })
+  }
 
   const started = Date.now()
   try {
