@@ -106,11 +106,15 @@ export const mission = {
   /** Autonomy track record (setup/45_track_record.sql): weekly / monthly scorecard and per-type record. */
   "mission.scorecard": async (p: Record<string, unknown>) => {
     const grain = oneOf(p, "grain", ["week", "month"] as const, "week")
-    const [periods, byType] = await Promise.all([
+    const [periods, byType, latency, probe] = await Promise.all([
       rows(`SELECT * FROM SNOWFLAKE_XDR.DETECTIONS.V_AUTONOMY_SCORECARD WHERE grain = ? ORDER BY period_start DESC`, [grain]),
       rows(`SELECT * FROM SNOWFLAKE_XDR.DETECTIONS.V_AUTONOMY_SCORECARD_BY_TYPE ORDER BY total DESC`),
+      // near-real-time lane (setup/46_realtime.sql); tolerated if not deployed
+      rows(`SELECT * FROM SNOWFLAKE_XDR.DETECTIONS.V_DETECTION_LATENCY ORDER BY fast DESC, findings_7d DESC LIMIT 25`).catch(() => []),
+      one(`SELECT status, latency_seconds, run_at, detail:message::VARCHAR AS message FROM SNOWFLAKE_XDR.DETECTIONS.CANARY_RUNS
+           WHERE rule_id = 'RT-001' ORDER BY run_at DESC LIMIT 1`).catch(() => null),
     ])
-    return { grain, periods, by_type: byType }
+    return { grain, periods, by_type: byType, latency, probe }
   },
 
   "mission.sampleReviews": async () =>

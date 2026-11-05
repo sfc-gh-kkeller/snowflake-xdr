@@ -465,7 +465,8 @@ function Scorecard() {
   const q = useXdr<Row>("mission.scorecard", { grain }, { refetchInterval: 300_000 })
   const sample = useXdrAction("mission.sampleReviews", { invalidate: ["mission."] })
   const cols: Column[] = [
-    { key: "period_start", label: grain === "week" ? "Week of" : "Month", className: "font-mono text-xs" },
+    { key: "period_start", label: grain === "week" ? "Week of" : "Month", className: "font-mono text-xs",
+      render: (r) => String(r.period_start ?? "").slice(0, grain === "week" ? 10 : 7) },
     { key: "changes", label: "Changes", align: "right" },
     { key: "went_live_unattended", label: "Live unattended", align: "right" },
     { key: "approved_by_human", label: "Approved", align: "right" },
@@ -499,6 +500,14 @@ function Scorecard() {
       <QueryState q={q}>
         {(d) => (
           <div className="space-y-3">
+            {d.probe ? (
+              <div className="text-sm">
+                Near-real-time lane: last end-to-end probe{" "}
+                <Pill tone={(d.probe as Row).status === "pass" ? "success" : "critical"}>{String((d.probe as Row).status)}</Pill>{" "}
+                {(d.probe as Row).latency_seconds >= 0 ? `${fmtNum((d.probe as Row).latency_seconds, 1)}s from ingest to finding` : ""}
+                <span className="text-muted-foreground"> (SLO 120s, {fmtAgo((d.probe as Row).run_at)})</span>
+              </div>
+            ) : null}
             <DataTable rows={(d.periods as Row[]) ?? []} columns={cols} rowKey="period_start" dense />
             <Disclosure title="By change type (90 days)">
               <DataTable dense rowKey="change_type" rows={(d.by_type as Row[]) ?? []} columns={[
@@ -512,6 +521,17 @@ function Scorecard() {
                 { key: "canary_pass_rate", label: "Canary", align: "right", render: (r) => pct(r.canary_pass_rate) },
                 { key: "precision", label: "Precision", align: "right", render: (r) => r.verdicts ? `${pct(r.precision)} (${r.verdicts})` : "-" },
                 { key: "reviews_agreed", label: "Reviews +/-", align: "right", render: (r) => `${r.reviews_agreed}/${r.reviews_disagreed}` },
+              ]} />
+            </Disclosure>
+            <Disclosure title="Detection latency by rule (7 days)">
+              <DataTable dense rowKey="rule_id" rows={(d.latency as Row[]) ?? []} columns={[
+                { key: "rule_id", label: "Rule", className: "font-mono text-xs" },
+                { key: "name", label: "Name", wrap: true },
+                { key: "fast", label: "Lane", render: (r) => r.fast ? <Pill tone="success">fast</Pill> : "batch" },
+                { key: "findings_7d", label: "Findings", align: "right" },
+                { key: "median_seconds", label: "Median", align: "right", render: (r) => `${fmtNum(r.median_seconds)}s` },
+                { key: "p95_seconds", label: "p95", align: "right", render: (r) => `${fmtNum(r.p95_seconds)}s` },
+                { key: "slo_seconds", label: "SLO", align: "right", render: (r) => `${r.slo_seconds}s` },
               ]} />
             </Disclosure>
           </div>
