@@ -5,6 +5,11 @@ attack-graph analysis, Cortex AI agents, response automation, case management
 and the analyst UI all run inside one Snowflake account. Data comes in over
 standard OpenTelemetry (OTLP); incidents go out to Jira or ServiceNow.
 
+> **Disclaimer:** this is an "art of the possible" project, built for inspiration and
+> demonstration. It is **not production software**, is not supported, and is **not an official
+> Snowflake product or endorsed by Snowflake**. It runs against synthetic demo data; response
+> connectors run in demo mode. Review, test and harden anything you reuse before relying on it.
+
 ## Screenshots
 
 | SOC Overview | Triage & Cases |
