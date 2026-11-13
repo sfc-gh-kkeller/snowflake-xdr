@@ -48,10 +48,13 @@ standard OpenTelemetry (OTLP); incidents go out to Jira or ServiceNow.
   the Detection Autopilot writes the mapping for sources it has never seen
 - **Cases & tickets** — NIST-style incident lifecycle with an audit trail, response tasks,
   SLAs and Cortex-written incident reports, synced both ways with Jira or ServiceNow
-- **Rule packs** — 87 best-practice detections for Snowflake, AWS, Entra ID / Azure, Okta,
-  Databricks, PostgreSQL, ClickHouse and Salesforce that install themselves (in shadow)
-  as soon as their data arrives; the Snowflake pack reads INFORMATION_SCHEMA (minutes),
-  ACCOUNT_USAGE (history) and Trust Center findings
+- **Rule packs** — best-practice detections for Snowflake, AWS, Entra ID / Azure, Okta,
+  Databricks, PostgreSQL, ClickHouse, Salesforce, CrowdStrike, Defender, SentinelOne and email
+  (M365, Proofpoint) that install themselves (in shadow) as soon as their data arrives; the
+  Snowflake pack reads INFORMATION_SCHEMA (minutes), ACCOUNT_USAGE (history) and Trust Center findings
+- **Sigma** — 1,089 SigmaHQ community rules compiled to SQL without AI; every branch of every rule
+  proves it fires before it can be installed, and a weekly sync pulls new releases
+- **Detection-as-code** — rules export to git; CI verifies a pull request with canaries, merge applies it
 - **Threat-informed autonomy** — a threat profile from the customer's own words plus
   their incidents and KEV entries for products they run ranks what the autopilot builds
   next; new KEV entries trigger a 30-day retro-hunt
@@ -60,9 +63,17 @@ standard OpenTelemetry (OTLP); incidents go out to Jira or ServiceNow.
   verified, not claimed. Change types earn more autonomy from their track record
 - **Mission Control** — one page to stay in charge: what needs you, a ledger of every
   AI action with undo, a kill switch, a daily change budget and a morning briefing
-- **Approval-gated response** — auto-investigation of P1/P2 cases and
-  `contain_snowflake_user` (roles stripped to PUBLIC, exact undo) limited in SQL to an
-  allowlisted demo user
+- **Approval-gated response** — auto-investigation of P1/P2 cases picks the action that fits each
+  entity: `contain_snowflake_user`, Okta / Entra suspend or session revoke, CrowdStrike / Defender /
+  SentinelOne host isolation (demo mode: real API calls built and logged), automatic IOC blocking;
+  allowlisted targets only, every action undoable
+- **Autonomy track record** — weekly / monthly scorecard of what the AI changed, what went live
+  unattended, what was reversed and how precise its rules are, plus human review samples
+- **Near-real-time lane** — dynamic table plus a triggered serverless task: EDR alert to finding in ~15 s
+- **Behaviour baselines (UEBA)** — 30-day entity and peer profiles; explained anomalies raise
+  finding confidence instead of alerting on their own; Cortex ML anomaly detection with enough history
+- **Enterprise basics** — console roles (viewer / analyst / engineer / admin), tenant row access
+  policies, SOC 2 / ISO 27001 / NIST CSF evidence, retention tiers, STIX/TAXII 2.1 and IOC retro-hunt
 - **Splunk CIM compatible** — DB Connect can query `SPLUNK_VIEWS` directly
 
 ## Deploy end to end
@@ -730,6 +741,9 @@ snowflake-xdr/
 │   ├── deploy_otel_receiver.sh # build + deploy the OTLP receiver (SPCS)
 │   ├── load_rule_packs.sh      # load rule-packs/*/pack.yaml, coverage-aware install
 │   ├── gen_rule_packs.py       # generates the AWS/Entra/Okta/Databricks/Postgres/ClickHouse/Salesforce packs
+│   ├── gen_edr_packs.py        # generates the CrowdStrike/Defender/SentinelOne/email packs
+│   ├── sync_sigma.sh           # vendor + import + verify SigmaHQ rules (--refresh: new release)
+│   ├── export_rules.py         # detection-as-code: export / verify / apply
 │   ├── otel_replay.py          # send demo attack stories as OTLP
 │   └── reset_demo_clock.sh     # move demo timestamps to "now"
 ├── setup/                      # SQL, run in order by the runner
@@ -746,8 +760,14 @@ snowflake-xdr/
 │   ├── 32, 33                  # case management (lifecycle, SLA, reports), Jira/ServiceNow ticket sync
 │   ├── 34, 35, 40              # rule packs + DATABASE_ACTIVITY, Snowflake telemetry lanes + Trust Center, pack OTel mappings
 │   ├── 36, 37                  # Mission Control (ledger, needs-you, kill switch, briefing), threat profile
-│   └── 38, 39                  # canaries + trust ladder, auto-investigation + approval-gated response
-├── rule-packs/<pack>/pack.yaml # detections + canary fixtures (non-Snowflake packs: scripts/gen_rule_packs.py)
+│   ├── 38, 39                  # canaries + trust ladder, auto-investigation + approval-gated response
+│   ├── 41, 42                  # Sigma import + verification, detection-as-code
+│   ├── 43, 44                  # EDR + email sources, multi-connector response (demo mode)
+│   ├── 45, 46                  # autonomy track record, near-real-time lane (dynamic table)
+│   └── 47, 48                  # UEBA baselines, RBAC / tenancy / compliance / TAXII
+├── sigma/                      # deterministic Sigma -> SQL compiler + tests
+├── detections/                 # detection-as-code rule YAML (CI: .github/workflows/detections.yml)
+├── rule-packs/<pack>/pack.yaml # detections + canary fixtures; rule-packs/sigma/ = vendored SigmaHQ
 ├── data/ctf/                   # compressed CTF CSVs
 ├── otel-receiver/              # OTLP/HTTP receiver container + collector examples
 ├── xdr-console/                # XDR Console (Snowflake App Runtime, Next.js)
