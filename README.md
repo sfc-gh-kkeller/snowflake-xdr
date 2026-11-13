@@ -93,7 +93,7 @@ scripts/deploy_demo.sh --fresh --yes-drop-everything   # drop and rebuild from z
 
 | Option | Effect |
 |---|---|
-| `--connection NAME` | snow CLI connection (default `aws_demo_kevin`) |
+| `--connection NAME` | snow CLI connection (default `$SNOWFLAKE_CONNECTION`, else `default`) |
 | `--fresh --yes-drop-everything` | Drop `SNOWFLAKE_XDR` and `CTF` (cases, notes, dispositions) and rebuild |
 | `--skip-app` | Don't deploy the XDR Console |
 | `--skip-ai` | Skip the Cortex AI triage/classification pipeline steps |

@@ -6,7 +6,7 @@
   python3 scripts/export_rules.py apply  [files...]  merge: apply changed detections/*.yml to Snowflake
 
 Pack rules live in rule-packs/*/pack.yaml (and Sigma in rule-packs/sigma/) and are not exported here.
-Uses the snow CLI (connection from $CONN, default aws_demo_kevin; CI passes a temporary connection).
+Uses the snow CLI (connection from $CONN, default $SNOWFLAKE_CONNECTION or "default"; CI passes a temporary connection).
 Needs pyyaml.
 """
 import glob
@@ -25,7 +25,7 @@ SNOW = os.environ.get("SNOW", "snow")
 def snow_args():
     if os.environ.get("SNOWFLAKE_CI") == "1":  # GitHub Actions: SNOWFLAKE_* env vars, key-pair auth
         return ["-x"]
-    return ["-c", os.environ.get("CONN", "aws_demo_kevin")]
+    return ["-c", os.environ.get("CONN") or os.environ.get("SNOWFLAKE_CONNECTION", "default")]
 
 
 def sql(query, *binds):

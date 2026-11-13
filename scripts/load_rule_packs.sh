@@ -4,7 +4,7 @@
 #
 #   scripts/load_rule_packs.sh [connection] [pack_id ...]
 set -euo pipefail
-CONN="${1:-${SNOWFLAKE_CONNECTION:-aws_demo_kevin}}"
+CONN="${1:-${SNOWFLAKE_CONNECTION:-default}}"
 shift || true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SQL="$(mktemp -t xdr_packs.XXXXXX).sql"

@@ -9,7 +9,7 @@
 # script: TASK_SIGMA_SYNC pulls each new SigmaHQ release.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONN="${CONN:-aws_demo_kevin}"
+CONN="${CONN:-${SNOWFLAKE_CONNECTION:-default}}"
 SNOW="${SNOW:-snow}"
 PY="${PY:-python3}"
 OUT="$REPO_ROOT/rule-packs/sigma"

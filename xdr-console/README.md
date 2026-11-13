@@ -45,7 +45,7 @@ The SQL in the handlers was ported from the Streamlit pages in `../streamlit/pag
 
 ```bash
 npm install
-SNOWFLAKE_CONNECTION_NAME=aws_demo_kevin npm run dev    # http://localhost:3000
+SNOWFLAKE_CONNECTION_NAME=<connection> npm run dev    # http://localhost:3000
 npm test                                                # vitest, Snowflake mocked
 ```
 
@@ -55,10 +55,10 @@ connection, which may be a different account.
 ## Deploy
 
 ```bash
-snow app validate -c aws_demo_kevin
-snow app deploy --verbose -c aws_demo_kevin     # remote build + promote, ~2 min
-snow app open --print-only -c aws_demo_kevin    # console URL
-snow app events --last 200 -c aws_demo_kevin    # live service logs
+snow app validate -c <connection>
+snow app deploy --verbose -c <connection>     # remote build + promote, ~2 min
+snow app open --print-only -c <connection>    # console URL
+snow app events --last 200 -c <connection>    # live service logs
 ```
 
 `app.yml` (version 2) holds both the deployment config (database, schema,

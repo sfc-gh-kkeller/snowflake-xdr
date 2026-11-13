@@ -6,12 +6,12 @@
 # few fresh live-tail events, and rebuilds the attack graph over the shifted
 # window. Takes about a minute; safe to run as often as you like.
 #
-# Usage: scripts/reset_demo_clock.sh [--connection NAME]   (default aws_demo_kevin)
+# Usage: scripts/reset_demo_clock.sh [--connection NAME]   (default $SNOWFLAKE_CONNECTION, else "default")
 # ============================================================================
 
 set -euo pipefail
 
-CONN="aws_demo_kevin"
+CONN="${SNOWFLAKE_CONNECTION:-default}"
 [[ "${1:-}" == "--connection" ]] && CONN="${2:?--connection needs a name}"
 SNOW="${SNOW:-snow}"
 

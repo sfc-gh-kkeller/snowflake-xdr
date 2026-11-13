@@ -5,7 +5,7 @@
 # image and restarts the service on it.
 set -euo pipefail
 
-CONN="${SNOWFLAKE_CONNECTION:-aws_demo_kevin}"
+CONN="${SNOWFLAKE_CONNECTION:-default}"
 while getopts "c:" o; do case $o in c) CONN="$OPTARG" ;; *) exit 1 ;; esac; done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TAG="v$(date +%Y%m%d%H%M%S)"

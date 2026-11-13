@@ -14,7 +14,7 @@
 #   scripts/deploy_demo.sh [options]
 #
 # Options:
-#   --connection NAME       snow CLI connection (default: aws_demo_kevin)
+#   --connection NAME       snow CLI connection (default: $SNOWFLAKE_CONNECTION, else "default")
 #   --fresh                 drop SNOWFLAKE_XDR + CTF and rebuild from zero
 #   --yes-drop-everything   required together with --fresh
 #   --skip-app              don't deploy the XDR Console
@@ -39,7 +39,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-CONN="aws_demo_kevin"
+CONN="${SNOWFLAKE_CONNECTION:-default}"
 FRESH=0
 CONFIRM_DROP=0
 SKIP_APP=0
