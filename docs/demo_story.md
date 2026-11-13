@@ -3,24 +3,6 @@
 A talk track for demoing this account, from the coexistence pitch to the
 live XDR platform.
 
-## The Hook: The SIEM Cost Problem
-
-Traditional SIEM architectures force a trade-off: ingest everything into Splunk
-(expensive) or lose visibility. The numbers:
-
-| | All-Splunk | Hybrid (Splunk + Snowflake) |
-|---|---|---|
-| Ingestion cost | $$$$$$ | $$ (**70-80% savings**) |
-| Real-time detection | Full | Critical data subset |
-| Historical investigation | Limited by cost | **Years of data** |
-| Retention/compliance | Very expensive | Cheap (years) |
-
-- Splunk Cloud: ~$1,500-$3,000 per GB/year
-- Snowflake: ~$276-$480 per TB/year — **50-100x cheaper** for historical data
-
-Run `python3 tools/savings_calculator.py --total <daily GB>` (from the
-Splunk_Connect repo) to personalize this with the prospect's own volumes.
-
 ## The Strategy: Route, Don't Rip
 
 ```
@@ -55,8 +37,7 @@ The `CTF` database holds a pre-built security data lake:
 
 Show a Splunk dashboard querying this via DB Connect (import
 `snowflake_security_lake.xml` from the Splunk_Connect repo). Point: "your
-Splunk dashboards keep working — the data lives in Snowflake at 1/50th the
-storage cost."
+Splunk dashboards keep working, and the data lives in Snowflake."
 
 ### Chapter 2 — Snowflake-Native XDR (the replacement)
 
@@ -94,8 +75,8 @@ CALL SNOWFLAKE_XDR.DETECTIONS.AI_HUNTING_AGENT('lateral_movement', 24);
 
 ### Chapter 3 — Where This Goes (the close)
 
-- Splunk ES is a rules engine on expensive storage; this is the same
-  detections + AI reasoning + unlimited retention on Snowflake economics.
+- Detections, AI reasoning and long retention run on the same platform
+  as the rest of the customer's data.
 - The detection rules are the same analytics your Splunk Content Management
   already knows — mapped 1:1 to MITRE ATT&CK, with the originating Splunk
   analytic story and detection name stored on every rule.
@@ -105,7 +86,6 @@ CALL SNOWFLAKE_XDR.DETECTIONS.AI_HUNTING_AGENT('lateral_movement', 24);
 
 ## Key Talking Points
 
-- "70-80% ingestion savings" — routing, not ripping
-- "50-100x cheaper retention" — investigations over years, not 90 days
+- "Route, don't rip": keep real-time detection where it is, investigate over years of data
 - "The same MITRE ATT&CK coverage, with an LLM triaging your queue"
 - "Your Splunk dashboards keep working — today via DB Connect, natively next year"
