@@ -5,11 +5,6 @@ attack-graph analysis, Cortex AI agents, response automation, case management
 and the analyst UI all run inside one Snowflake account. Data comes in over
 standard OpenTelemetry (OTLP); incidents go out to Jira or ServiceNow.
 
-> **Access:** this repository is private (`sfc-gh-kkeller/snowflake-xdr`). Ask the owner for
-> access. Clone it with your GitHub credentials (`gh repo clone sfc-gh-kkeller/snowflake-xdr`).
-> The detection-as-code workflow (`.github/workflows/detections.yml`) runs in the private repo
-> and needs the Snowflake connection secrets set in its Actions settings.
-
 ## Screenshots
 
 | SOC Overview | Triage & Cases |
